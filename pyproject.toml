@@ -13,12 +13,12 @@ classifiers = [
     "Operating System :: OS Independent",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
-requires-python = ">=3.10,<3.12"
+requires-python = ">=3.12"
 dependencies = [
     "setuptools>=68",
-    "torch>=2.7.0",
+    "torch>=2.6.0",
     "torchdata",
-    "transformers==4.52.2",
+    "transformers>=4.53.0",
     "triton==3.3.0",
     "datasets==3.4.1",
     "einops",
@@ -27,8 +27,7 @@ dependencies = [
     "tiktoken",
     "tensorboard",
     "wheel>=0.45.1",
-    "causal-conv1d @ git+https://github.com/Dao-AILab/causal-conv1d.git@v1.5.0.post8",
-    "flash-attn==2.7.3",
+    "flash-attn==2.6.3",
     "rich>=14.0.0",
     "matplotlib>=3.10.1",
     "seaborn>=0.13.2",
@@ -42,7 +41,6 @@ dependencies = [
     "torchao",
     "bento",
     "torchtitan",
-    "popcorn",
     "poetry>=2.1.3",
 ]
 
@@ -50,7 +48,8 @@ dependencies = [
 Homepage = "https://github.com/tilde-research/llmonade"
 
 [tool.uv]
-no-build-isolation-package = ["causal-conv1d", "flash-attn"]
+no-build-isolation-package = ["flash-attn"]
+
 
 [build-system]
 requires = ["setuptools>=45", "wheel", "ninja", "torch"]
@@ -62,15 +61,15 @@ dev = [
     "pytest"
 ]
 
+
 [tool.isort]
 line_length = 127
 multi_line_output = 3
 
 [tool.uv.sources]
-popcorn = { path = "3rdparty/bento/popcorn", editable = true }
 bento = { path = "3rdparty/bento", editable = true }
 lm-eval = { path = "3rdparty/lm-evaluation-harness", editable = true }
-torchtitan = { path = "3rdparty/toast", editable = true }
+torchtitan = { path = "3rdparty/torchtitan", editable = true }
 
 [tool.poetry]
 version = "0.1.0"
