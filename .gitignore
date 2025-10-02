@@ -1,0 +1,98 @@
+# test file
+test.py
+
+# data files
+data
+
+# # bash scripts
+# *.sh
+
+# docs
+docs/_build
+
+# intermediate files
+build
+dist
+*.egg-info
+
+# experimental results
+exp
+results
+wandb
+*.csv
+*.png
+*.html
+
+# log and config files
+log.*
+*.log
+*.cfg
+*.ini
+
+# pycache
+__pycache__
+
+# saved model
+*.pkl
+*.pt
+
+# vscode
+# .vscode
+
+# macOS
+.DS_Store
+.venv
+
+logs/
+*.png
+*.gif
+*.npz
+
+*.ruff_cache/
+
+temp.py
+
+output
+temp.py
+slurm/evals
+
+evals/mechanistic/experiments/
+evals/wandb_vis/
+tmp/
+
+# synthetic datasets
+synthetic_qa_data/
+synthetic_qa_data_*/
+
+# hashhop and synthetic experiments datasets
+hashhop_experiments/datasets/
+synthetic_qa_experiments/datasets/
+synthetic_qa_experiments/results/
+synthetic_qa_experiments/old_results/
+
+# general results and datasets folders
+results/
+datasets/
+old_results/
+*/results/
+*/datasets/
+*/old_results/
+experiments/results/
+experiments/datasets/
+experiments/old_results/
+
+# Parquet dataset directories
+mqar_b16_kv1_seq8192_500samples/
+synthetic_mqar_curriculum_data/
+synthetic_mqar_kv1_5steps/
+synthetic_shuffle_dyck_data_128sym_p0.5_10000seq/
+
+# General pattern for synthetic and mqar datasets
+*mqar_*_data/
+synthetic_*_data/
+*mqar_*/
+synthetic_*_data_*/
+
+# Dyck dataset directories
+synthetic_dyck/
+synthetic_shuffle_dyck/
