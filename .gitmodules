@@ -1,6 +1,6 @@
 [submodule "3rdparty/bento"]
 	path = 3rdparty/bento
-	url = https://github.com/tilde-research/bento.git # TILDE VERSION
+	url = https://github.com/kavnwang/bento
 	branch = main
 [submodule "3rdparty/toast"]
 	path = 3rdparty/toast
@@ -8,5 +8,9 @@
 	branch = main
 [submodule "3rdparty/lm-evaluation-harness"]
 	path = 3rdparty/lm-evaluation-harness
-	url = https://github.com/tilde-research/tilde-lm-eval-harness.git # TILDE VERSION
+	url = https://github.com/kavnwang/lm-evaluation-harness
+	branch = main
+[submodule "3rdparty/torchtitan"]
+	path = 3rdparty/torchtitan
+	url = https://github.com/kavnwang/torchtitan
 	branch = main
