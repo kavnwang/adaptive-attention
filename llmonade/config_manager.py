@@ -852,6 +852,24 @@ class JobConfig:
             """,
         )
         self.parser.add_argument(
+            "--checkpoint.initial_load_path",
+            type=str,
+            default=None,
+            help="""
+                Path to the initial checkpoint to load for resuming training from a previous run.
+                If the current checkpoint folder is not empty, this option will be ignored.
+                Example: '/path/to/checkpoint/step_10000'
+            """,
+        )
+        self.parser.add_argument(
+            "--checkpoint.initial_load_model_weights_only",
+            action="store_true",
+            help="""
+                When loading from initial_load_path, only load model weights (not optimizer/scheduler states).
+                Default is True. Use --checkpoint.no_initial_load_model_weights_only to load full checkpoint.
+            """,
+        )
+        self.parser.add_argument(
             "--checkpoint.interval",
             type=int,
             default=500,
@@ -864,6 +882,17 @@ class JobConfig:
                 When model_weights_only=True, only model weights will be saved at the end of training.
                 With this, checkpoints can be loaded using `torch.load(..., weights_only=True)` after conversion.
                 When model_weights_only=False, the full checkpoint will be saved.
+                A full checkpoint includes model, optimizer and train_state, which can be used to resume training.
+                The default value is false.
+            """,
+        )
+        self.parser.add_argument(
+            "--checkpoint.last_save_model_weights_only",
+            action="store_true",
+            help="""
+                When last_save_model_weights_only=True, only model weights will be saved at the end of training,
+                the last save. With this, checkpoints can be loaded using `torch.load(..., weights_only=True)`
+                after conversion. When last_save_model_weights_only=False, the full checkpoint will be saved.
                 A full checkpoint includes model, optimizer and train_state, which can be used to resume training.
                 The default value is false.
             """,

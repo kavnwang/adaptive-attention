@@ -18,6 +18,6 @@
     "vocab_size": 50304,
     "qkv_bias": true,
     "qk_norm": true,
-    "torch_dtype": "float32"
+    "torch_dtype": "bfloat16"
 }
 

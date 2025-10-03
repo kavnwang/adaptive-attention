@@ -78,14 +78,14 @@ def create_optimizer_for_phase(
             job_config.optimizer.weight_decay = job_config.training.synthetic_weight_decay
         
         # Build optimizer with phase-specific config
-        optimizers = build_optimizers(model_parts, job_config, ft_manager, parallel_dims)
+        optimizers = build_optimizers(model_parts, job_config, ft_manager)
         
         # Restore original config
         job_config.optimizer.lr = original_lr
         job_config.optimizer.weight_decay = original_wd
     else:
         # Use unified optimizer settings
-        optimizers = build_optimizers(model_parts, job_config, ft_manager, parallel_dims)
+        optimizers = build_optimizers(model_parts, job_config, ft_manager)
     
     return optimizers
 
@@ -338,7 +338,7 @@ def main(job_config: JobConfig):
     with torch.device("meta"):
         model = AutoModelForCausalLM.from_config(model_config)
         if (
-            getattr(model_config, "fuse_cross_entropy", False)
+            getattr(model_config, "fuse_linear_cross_entropy", False)
             and FusedLinearCrossEntropyLoss is not None
         ):
             model.criterion = FusedLinearCrossEntropyLoss(

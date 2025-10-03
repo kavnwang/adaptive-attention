@@ -13,7 +13,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Union
 import datasets
 import numpy as np
 import torch
-from datasets import Dataset, IterableDataset, interleave_datasets, load_dataset
+from datasets import Dataset, IterableDataset, IterableDatasetDict, interleave_datasets, load_dataset
 from datasets.iterable_dataset import ShufflingConfig
 from torch.distributed.checkpoint.stateful import Stateful
 from torchdata.stateful_dataloader import StatefulDataLoader
@@ -1036,6 +1036,12 @@ def preprocess_huggingface_dataset(dataset, dataset_name: str = None):
     Returns:
         Dataset with 'text' column
     """
+    # Handle IterableDataset or IterableDatasetDict (streaming) - can't check column_names
+    if isinstance(dataset, (IterableDataset, IterableDatasetDict)):
+        # For streaming datasets, we can't check column_names, so we peek at the first example
+        # Most datasets work fine with streaming, just return as-is
+        return dataset
+    
     # Check if dataset already has the expected columns
     if "text" in dataset.column_names or "content" in dataset.column_names:
         return dataset
@@ -1106,6 +1112,15 @@ def build_dataset(
                 streaming=streaming,
                 num_proc=num_workers if not streaming else None,
             )
+            
+            # Handle IterableDatasetDict - extract the requested split
+            if isinstance(dataset, IterableDatasetDict):
+                if dataset_split in dataset:
+                    dataset = dataset[dataset_split]
+                else:
+                    available = list(dataset.keys())
+                    logger.warning(f"Split '{dataset_split}' not found. Available: {available}. Using '{available[0]}'")
+                    dataset = dataset[available[0]]
         except ValueError as e:
             if "load_from_disk" in str(e):
                 # This is a saved dataset, load it differently
@@ -1220,6 +1235,15 @@ def build_dataset(
                 streaming=streaming,
                 num_proc=(num_workers if not streaming else None),
             )
+            
+            # Handle IterableDatasetDict - extract the requested split
+            if isinstance(subset, IterableDatasetDict):
+                if dataset_splits[i] in subset:
+                    subset = subset[dataset_splits[i]]
+                else:
+                    available = list(subset.keys())
+                    logger.warning(f"Split '{dataset_splits[i]}' not found. Available: {available}. Using '{available[0]}'")
+                    subset = subset[available[0]]
             
             # Preprocess HuggingFace datasets to ensure they have a 'text' column
             subset = preprocess_huggingface_dataset(subset, datasets[i])

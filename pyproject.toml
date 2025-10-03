@@ -16,10 +16,10 @@ classifiers = [
 requires-python = ">=3.11,<3.12"
 dependencies = [
     "setuptools>=68",
-    "torch>=2.6.0",
+    "torch>=2.6.0,<2.7.0",
     "torchdata",
     "transformers>=4.53.0",
-    "triton==3.3.0",
+    "triton==3.2.0",
     "datasets==3.4.1",
     "einops",
     "ninja",
