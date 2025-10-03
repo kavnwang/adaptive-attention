@@ -31,7 +31,6 @@ dependencies = [
     "rich>=14.0.0",
     "matplotlib>=3.10.1",
     "seaborn>=0.13.2",
-    "lm-eval[ruler]",
     "spacy>=3.8.5",
     "imageio>=2.37.0",
     "pillow>=11.2.1",
@@ -58,6 +57,9 @@ dev = [
     "ruff>=0.12.1",
     "pytest"
 ]
+evals = [
+    "lm-eval",  # Install separately: pip install -e 3rdparty/lm-evaluation-harness
+]
 
 [tool.isort]
 line_length = 127
@@ -66,10 +68,13 @@ multi_line_output = 3
 [tool.uv.sources]
 # Use prebuilt flash-attn wheel (saves ~10 min build time)
 flash-attn = { url = "https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.3.14/flash_attn-2.6.3%2Bcu124torch2.6-cp311-cp311-linux_x86_64.whl" }
-# Bento (FLA) stays editable - your changes work instantly!
-bento = { path = "3rdparty/bento", editable = true }
-lm-eval = { path = "3rdparty/lm-evaluation-harness", editable = true }
 torchtitan = { path = "3rdparty/torchtitan", editable = true }
+bento = { workspace = true, editable = true }
+
+[tool.uv.workspace]
+members = [
+    "3rdparty/bento",
+]
 
 [tool.poetry]
 version = "0.1.0"

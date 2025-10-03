@@ -18,6 +18,8 @@ NNODE=1 NGPU=1 LOG_RANK=0 bash llmonade/scripts/local/train.sh \
   --training.dataset_name sample-10BT \
   --training.streaming \
   --training.num_workers 2 \
+  --checkpoint.enable_checkpoint \
+  --checkpoint.interval 10 \
   --metrics.log_freq 1 \
   --metrics.enable_wandb false
 

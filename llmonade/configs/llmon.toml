@@ -42,7 +42,7 @@ decay_type = "cosine"
 lr_min = 0.1
 
 [checkpoint]
-enable_checkpoint = false
+enable_checkpoint = true
 folder = "checkpoint"
 interval_type = "steps"
 interval = 2048
