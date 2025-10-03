@@ -13,7 +13,7 @@ classifiers = [
     "Operating System :: OS Independent",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
-requires-python = ">=3.12"
+requires-python = ">=3.11,<3.12"
 dependencies = [
     "setuptools>=68",
     "torch>=2.6.0",
@@ -48,8 +48,12 @@ dependencies = [
 Homepage = "https://github.com/tilde-research/llmonade"
 
 [tool.uv]
-no-build-isolation-package = ["flash-attn"]
 
+[tool.uv.env]
+# Only build for H100 (compute capability 9.0) to speed up compilation
+# Remove or change this for multi-GPU deployments
+TORCH_CUDA_ARCH_LIST = "9.0"
+MAX_JOBS = "8"
 
 [build-system]
 requires = ["setuptools>=45", "wheel", "ninja", "torch"]
@@ -61,12 +65,14 @@ dev = [
     "pytest"
 ]
 
-
 [tool.isort]
 line_length = 127
 multi_line_output = 3
 
 [tool.uv.sources]
+# Use prebuilt flash-attn wheel (saves ~10 min build time)
+flash-attn = { url = "https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.3.14/flash_attn-2.6.3%2Bcu124torch2.6-cp311-cp311-linux_x86_64.whl" }
+# Bento (FLA) stays editable - your changes work instantly!
 bento = { path = "3rdparty/bento", editable = true }
 lm-eval = { path = "3rdparty/lm-evaluation-harness", editable = true }
 torchtitan = { path = "3rdparty/torchtitan", editable = true }
