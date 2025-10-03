@@ -12,11 +12,11 @@ import torch.serialization
 from torch.distributed.checkpoint.format_utils import dcp_to_torch_save
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
-import bento  # noqa
+import fla  # noqa
 
 # Explicitly import memory_mlp_router to ensure it's registered
 try:
-    import bento.models.memory_mlp_router  # noqa
+    import fla.models.memory_mlp_router  # noqa
 except ImportError:
     pass
 from torchtitan.tools.logging import init_logger, logger

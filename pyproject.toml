@@ -49,12 +49,6 @@ Homepage = "https://github.com/tilde-research/llmonade"
 
 [tool.uv]
 
-[tool.uv.env]
-# Only build for H100 (compute capability 9.0) to speed up compilation
-# Remove or change this for multi-GPU deployments
-TORCH_CUDA_ARCH_LIST = "9.0"
-MAX_JOBS = "8"
-
 [build-system]
 requires = ["setuptools>=45", "wheel", "ninja", "torch"]
 

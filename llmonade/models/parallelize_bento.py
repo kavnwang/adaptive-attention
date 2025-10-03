@@ -31,13 +31,18 @@ from torch.distributed.tensor.parallel import (
     parallelize_module,
 )
 
-from bento.modules.fused_linear_cross_entropy import LinearLossParallel
-from bento.layers.feature_mixers.mlp import SwiGLULinearParallel
-from bento.modules.parallel import PrepareModuleWeight
+from fla.modules.fused_linear_cross_entropy import LinearLossParallel
+from fla.modules.mlp import SwiGLULinearParallel
+from fla.modules.parallel import PrepareModuleWeight
 from torchtitan.config_manager import TORCH_DTYPE_MAP, JobConfig
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.tools.logging import logger
-from bento.layers.feature_mixers.memory import HashingMemoryRetrieval as HashingMemory
+# from fla.models.modeling_layers import HashingMemoryRetrieval as HashingMemory
+try:
+    from fla.models.modeling_layers import HashingMemoryRetrieval as HashingMemory
+except (ImportError, AttributeError):
+    # HashingMemory might not be available in current version
+    HashingMemory = type('HashingMemory', (), {})  # Dummy class
 
 
 def parallelize_bento(

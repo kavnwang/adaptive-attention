@@ -19,6 +19,10 @@ fi
 # Add to PATH
 export PATH="/workspace/bin:$PATH"
 
+# Set CUDA compilation flags for faster builds
+export TORCH_CUDA_ARCH_LIST="9.0"  # H100 only - change for other GPUs
+export MAX_JOBS="8"
+
 # Install jq if not present
 if ! command -v jq &> /dev/null; then
     echo "📦 Installing jq..."

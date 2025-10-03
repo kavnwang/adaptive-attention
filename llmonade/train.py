@@ -16,8 +16,8 @@ from torch import nn
 from torch.distributed.elastic.multiprocessing.errors import record
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
-from bento.modules.fused_linear_cross_entropy import FusedLinearCrossEntropyLoss
-from bento.ops.utils import prepare_position_ids
+from fla.modules.fused_linear_cross_entropy import FusedLinearCrossEntropyLoss
+from fla.ops.utils import prepare_position_ids
 from llmonade.components.checkpoint import TrainState, PretrainedLayerLoader
 from llmonade.config_manager import JobConfig
 from llmonade.data import build_dataloader, build_dataset

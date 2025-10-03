@@ -9,7 +9,7 @@ from lm_eval.models.huggingface import HFLM
 import os
 
 # Import bento models to register custom model types
-import bento  # noqa
+import fla  # noqa
 
 # Add imports for the Triton cache fix
 import logging
