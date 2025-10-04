@@ -15,7 +15,7 @@ import os
 sys.path.insert(0, str(Path(__file__).parent / "3rdparty" / "bento"))
 
 from fla.models.adaptive import AdaptiveTransformerConfig, AdaptiveTransformerForCausalLM
-from modular_arithmetic_dataset import ModularArithmeticDataset, collate_fn
+from modular_arithmetic_dataset import SimpleSumDataset, collate_fn
 
 # WandB setup
 try:
@@ -27,7 +27,7 @@ try:
         config={
             "architecture": "AdaptiveTransformer",
             "compression_type": "recurrent",
-            "dataset": "modular_arithmetic",
+            "dataset": "simple_sum",
         }
     )
 except ImportError:
@@ -49,33 +49,34 @@ print("    1. Input: N cached tokens + 1 new token = N+1 tokens")
 print("    2. Append N compress tokens")
 print("    3. Attention: Q from compress tokens, K,V from input tokens only")
 print("       - Compress tokens attend ONLY to input tokens (not to each other)")
-print("    4. Output N compress tokens become new cache")
-print("  - Process all input tokens sequentially")
+print("    4. MLP on combined sequence (input + compress tokens)")
+print("    5. Output N compress tokens become new cache")
+print("  - Process all input tokens sequentially for each depth level")
 print("  - Final: N compressed tokens encoding entire sequence")
 print("=" * 80)
 
 # Create datasets
 print("\nCreating datasets...")
-train_dataset = ModularArithmeticDataset(
+train_dataset = SimpleSumDataset(
     num_samples=50000,
     sequence_length=8,
-    modulo=97,
+    modulo=23,
     value_range=10,
     seed=12345
 )
 
-val_dataset = ModularArithmeticDataset(
+val_dataset = SimpleSumDataset(
     num_samples=2000,
     sequence_length=8,
-    modulo=97,
+    modulo=23,
     value_range=10,
     seed=54321
 )
 
-test_dataset = ModularArithmeticDataset(
+test_dataset = SimpleSumDataset(
     num_samples=1000,
     sequence_length=8,
-    modulo=97,
+    modulo=23,
     value_range=10,
     seed=99999
 )
@@ -91,23 +92,24 @@ print(f"Vocab size: {vocab_size}")
 print(f"Train samples: {len(train_dataset):,} ({len(train_loader):,} batches)")
 print(f"Val samples: {len(val_dataset):,} ({len(val_loader):,} batches)")
 print(f"Test samples: {len(test_dataset):,} ({len(test_loader):,} batches)")
-print(f"Task: (sum of 10 numbers) * (sum of 10 numbers) mod 97")
+print(f"Task: sum of 8 numbers mod 23")
 
 # Model with recurrent compression
 print("\nCreating model with RECURRENT compression...")
 config = AdaptiveTransformerConfig(
     vocab_size=vocab_size,
     hidden_size=256,
-    num_hidden_layers=4,
+    num_hidden_layers=1,
     num_heads=4,
     num_kv_heads=4,
     intermediate_size=512,
     max_position_embeddings=16,
-    compress_layers=(1,),  # Compress at layer 1
-    compress_p=0.5,  # Not used in recurrent mode
+    compress_layers=(0,),
+    compress_p=0.5,
     compress_return_padded=True,
     compress_deterministic=True,
-    compress_num_tokens=2,  # Final output: 2 tokens
+    compress_num_tokens=1,
+    recurrent_depth=0,
 )
 
 # Update wandb config with model details
@@ -120,9 +122,11 @@ if USE_WANDB:
         "intermediate_size": config.intermediate_size,
         "compress_layers": config.compress_layers,
         "compress_num_tokens": config.compress_num_tokens,
+        "recurrent_depth": config.recurrent_depth,
         "sequence_length": 8,
-        "modulo": 97,
+        "modulo": 23,
         "value_range": 10,
+        "task": "simple_sum",
         "batch_size": 64,
         "learning_rate": 3e-4,
         "num_epochs": 10,
@@ -136,8 +140,11 @@ print(f"Compression type: RECURRENT")
 print(f"  - Per step: {config.compress_num_tokens} cached + 1 new = {config.compress_num_tokens + 1} input tokens")
 print(f"  - Attention: Q={config.compress_num_tokens} compress → K,V={config.compress_num_tokens + 1} input")
 print(f"  - Compress tokens attend only to input (not each other)")
+print(f"  - MLP processing on combined sequence")
 print(f"  - Output: {config.compress_num_tokens} compress tokens as new cache")
 print(f"Final compressed tokens: {config.compress_num_tokens}")
+print(f"Task: Simple sum of {8} numbers modulo {23}")
+print("Input format: [SEP] x1 x2 ... x8 [SEP]")
 
 # Training setup with stability improvements
 optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=0.01, eps=1e-8)
@@ -165,16 +172,17 @@ for epoch in range(num_epochs):
             seq_len = input_ids.size(1)
             outputs = model(
                 input_ids=input_ids,
-                compress_layers=(1,),
-                compress_recurrent=True,  # Use recurrent compression
-                compress_prefix_len=seq_len,  # Compress entire sequence
+                compress_layers=(0,),
+                compress_recurrent=True,
+                compress_prefix_len=seq_len,
                 compress_num_tokens=config.compress_num_tokens,  # Number of state tokens
+                recurrent_depth=0,
             )
             logits = outputs.logits[:, -1, :]  # Last position
             target_token_ids = targets + value_offset
             loss = nn.functional.cross_entropy(logits, target_token_ids)
         
-        # Check for NaN BEFORE backward to prevent corrupting gradients
+        # Check for NaN BEFORE backward to prevent corrupting gradients.
         if torch.isnan(loss) or torch.isinf(loss) or torch.isnan(logits).any() or torch.isinf(logits).any():
             print(f"  WARNING: NaN/Inf detected at batch {batch_idx+1}, skipping backward pass...")
             continue
@@ -183,11 +191,11 @@ for epoch in range(num_epochs):
         optimizer.zero_grad()
         loss.backward()
         
-        # Check gradients for NaN before updating weights
+        # Check gradients for NaN before updating weights.
         grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         if torch.isnan(grad_norm) or torch.isinf(grad_norm):
             print(f"  WARNING: NaN/Inf gradients at batch {batch_idx+1}, skipping optimizer step...")
-            optimizer.zero_grad()  # Clear the bad gradients
+            optimizer.zero_grad()
             continue
         
         optimizer.step()
@@ -231,10 +239,11 @@ for epoch in range(num_epochs):
                 seq_len = input_ids.size(1)
                 outputs = model(
                     input_ids=input_ids,
-                    compress_layers=(1,),
+                    compress_layers=(0,),
                     compress_recurrent=True,
                     compress_prefix_len=seq_len,
                     compress_num_tokens=config.compress_num_tokens,
+                    recurrent_depth=0,
                 )
                 logits = outputs.logits[:, -1, :]
                 target_token_ids = targets + value_offset
@@ -294,10 +303,11 @@ with torch.no_grad():
             seq_len = input_ids.size(1)
             outputs = model(
                 input_ids=input_ids,
-                compress_layers=(1,),
+                compress_layers=(0,),
                 compress_recurrent=True,
                 compress_prefix_len=seq_len,
                 compress_num_tokens=config.compress_num_tokens,
+                recurrent_depth=0,
             )
             logits = outputs.logits[:, -1, :]
             target_token_ids = targets + value_offset
@@ -333,11 +343,13 @@ print("\n" + "=" * 80)
 print("ANALYSIS - RECURRENT COMPRESSION")
 print("=" * 80)
 print(f"Model parameters: {total_params:,}")
-print(f"Compression: many tokens → {config.compress_num_tokens} tokens (recurrent)")
-print(f"  - Method: Sequential processing matching standard adaptive attention")
+print(f"Compression: {8+2} tokens → {config.compress_num_tokens} tokens (recurrent)")
+print(f"  - Method: Sequential processing with recurrent depth {config.recurrent_depth}")
 print(f"  - Per step: Q={config.compress_num_tokens} compress → K,V={config.compress_num_tokens + 1} input")
 print(f"  - Compress tokens attend only to input tokens (not each other)")
+print(f"  - MLP processing on combined sequence")
 print(f"  - Output: {config.compress_num_tokens} compress tokens")
+print(f"Task: sum of {8} numbers mod {23}")
 print(f"Train accuracy: {train_acc:.2f}%")
 print(f"Val accuracy:   {best_val_acc:.2f}%")
 print(f"Test accuracy:  {test_acc:.2f}%")
