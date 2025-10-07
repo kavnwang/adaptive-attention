@@ -96,3 +96,7 @@ synthetic_*_data_*/
 # Dyck dataset directories
 synthetic_dyck/
 synthetic_shuffle_dyck/
+
+*.json
+*.npy
+*.zip

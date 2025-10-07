@@ -1,0 +1,63 @@
+article_id: 12175e27951ca8468fb884f96ccecb433f6cd4af
+valid_memory_tokens: 32
+argmax_text: ------,,--------,,-------------,
+
+article_id: 71988cd9726ccd7c47f910448e4edce62f6607f5
+valid_memory_tokens: 32
+argmax_text: ,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
+
+article_id: 32139deb4f8c2f7cc2cca0b656f6156447aaded6
+valid_memory_tokens: 32
+argmax_text: ,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
+
+article_id: 37e0500049b7602c2a5ef8883f70e7ee9b77c70c
+valid_memory_tokens: 32
+argmax_text: --------------,-----------------
+
+article_id: 8c8353f710ce90692268661c3e8806925d506368
+valid_memory_tokens: 32
+argmax_text: ,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
+
+article_id: 2fa72d7e4645f53c59c51bbd6306c918e8900142
+valid_memory_tokens: 32
+argmax_text:  and and and and and and and and and and and and and and and and and and and and and and and and and and and and and and and and
+
+article_id: 4ea509ddbfe4a3e0adcf72bd6d41c6141098f2b5
+valid_memory_tokens: 32
+argmax_text: ,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
+
+article_id: 8809385efb68bf20842cf5411fe05d613eb95210
+valid_memory_tokens: 32
+argmax_text:  less less less---'s's's less- less less-- over over's's's's's- less less less less-----
+
+article_id: c59487cb25eb19bcbfaf7586a1ca8dcedd00a84e
+valid_memory_tokens: 32
+argmax_text: ,, ( last then last last last (- then,, last last.,-,, then then then, (, 1 then (,,,
+
+article_id: 8c9a26b8277fa1cb3959117d0c22c6fff8caa8af
+valid_memory_tokens: 32
+argmax_text: --------------------------------
+
+article_id: 929adce250961737ce3c642677b487491d6aabc2
+valid_memory_tokens: 32
+argmax_text:  and----- and and and- and and-- overall overall- and and. overall overall overall overall- or overall overall::--
+
+article_id: 676cbeaffe528145ab8bb5a7e2cc94bcc64a786e
+valid_memory_tokens: 32
+argmax_text:  and and and and and and and and and and and and and and-- and and and,,-- and and and and and and-- and
+
+article_id: 0a00f0dc35f66ec29ebecafbbc1ef6a7e0d383db
+valid_memory_tokens: 32
+argmax_text: ,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
+
+article_id: cc3a754556826d5024d03c06eeab2ed648610874
+valid_memory_tokens: 32
+argmax_text: ,,,,,,,,,,,,,,,,::ing,,,,,,,,,,,,,
+
+article_id: 0a99f09188cd679df4cd36976d11c87789dd5b8f
+valid_memory_tokens: 32
+argmax_text: ------------------,-------------
+
+article_id: 2df98f573d8a5471b1a90c054aa143b3e26422df
+valid_memory_tokens: 32
+argmax_text: -- and and---- and and and and----- and-------- and and and and--

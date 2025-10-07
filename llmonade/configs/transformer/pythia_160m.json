@@ -17,5 +17,5 @@
     "tie_word_embeddings": false,
     "use_cache": true,
     "vocab_size": 50304,
-    "torch_dtype": "float32"
+    "torch_dtype": "bfloat16"
 }

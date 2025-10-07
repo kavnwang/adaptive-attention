@@ -41,6 +41,8 @@ dependencies = [
     "bento",
     "torchtitan",
     "poetry>=2.1.3",
+    "openai>=1.0.0",
+    "tqdm>=4.65.0",
 ]
 
 [project.urls]
