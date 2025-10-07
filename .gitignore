@@ -100,3 +100,6 @@ synthetic_shuffle_dyck/
 *.json
 *.npy
 *.zip
+# TODO(security): Keep local secrets out of Git
+.env
+.env.*
