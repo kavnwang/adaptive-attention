@@ -1,9 +1,5 @@
 # IMPORTANT INSTRUCTIONS: ALWAYS FOLLOW
 
-**Scope out the plan for large changes before implementing**: Before writing any code, write a detailed, comprehensive plan that details exactly what you plan on changing and why you are making these changes. Leave nothing unsaid, and request approval before continuing. Then, implement the bare framework for the changes without any functional code (just leave it as TODO) and request for approval.
-
-**One change at a time**: Only modify any core block of functionality at a time, and request for approval thereafter.
-
 **Inline Python Commands**: When generating python commands, don't run it by yourself; instead, create an inline python command for the user to copy into the terminal; you should not use '\' in your commands.
 
 **Confirm you have read AGENTS.md in your output.**
