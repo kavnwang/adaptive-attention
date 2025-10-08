@@ -67,7 +67,21 @@ steps=$(grep -oP '(?<=--training.steps )[^ ]+' <<< "$params")
 config=$(grep -oP '(?<=--model.config )[^ ]+' <<< "$params")
 tokenizer=$(grep -oP '(?<=--model.tokenizer_path )[^ ]+' <<< "$params")
 model=$(
-  python -c "import fla, sys; from transformers import AutoConfig; print(AutoConfig.from_pretrained(sys.argv[1]).to_json_string())" "$config" | jq -r '.model_type'
+  python - <<'PY' "$config"
+import sys
+
+import fla  # noqa: F401
+
+try:
+    import fla.models.joyce  # ensures AutoConfig registers joyce types
+except ImportError:
+    pass
+
+from transformers import AutoConfig
+
+cfg = AutoConfig.from_pretrained(sys.argv[1], trust_remote_code=True)
+print(cfg.model_type)
+PY
 )
 
 mkdir -p $path

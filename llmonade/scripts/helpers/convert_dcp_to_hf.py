@@ -14,6 +14,13 @@ from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 import fla  # noqa
 
+# Ensure custom models are registered with HF Auto classes
+try:
+    import fla.models.joyce  # triggers AutoConfig.register / AutoModel.register
+except Exception as _e:
+    # It's safe to keep going; this import is only needed for custom model types
+    pass
+
 # Explicitly import memory_mlp_router to ensure it's registered
 try:
     import fla.models.memory_mlp_router  # noqa
