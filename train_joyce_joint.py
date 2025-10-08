@@ -1,631 +1,548 @@
-
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-Joint (continued) training for Joyce: compress-at-layer-L + upsample training,
-and "compressed prefix" conditioning for the second half of the sequence.
+Joint / continued training for Joyce:
+- Input per sample: 2 * seq_len tokens (first window + second window).
+- Run base layers [0..L] across the whole 2*seq_len.
+- Compress FIRST window (length S = seq_len) with Joyce.
+- Branch A (reconstruction): upsample compressed -> run [L+1..end] on length S -> CE loss A over first window.
+- Branch B (extended context): prepend compressed to SECOND window -> run [L+1..end] on length (C+S) -> CE loss B over last S only.
+- Optimize base + Joyce modules jointly; initialize Joyce from AE checkpoints if provided.
 
-This script implements the "Combined Training" phase described in the Joyce
-technical write-up. It assumes you have already pre-trained:
-  1) a base causal language model (next-token prediction), and
-  2) a Joyce compression block + upsampling block (reconstruction L2 loss).
-
-During each training step with sequence length 2*S (S = args.seq_len), we:
-  • Run layers 0..L on the first S tokens ("A"), obtain H_A (B, S, d).
-  • Compress H_A -> C (B, T, d), where T = args.num_compressed_states.
-  • Upsample C -> U_A (B, S, d) and run layers L+1..end on U_A to get logits_A.
-    Compute standard LM loss on "A" (next-token prediction). This loss updates
-    base model, compressor, and upsampler.
-  • Run layers 0..L on the last S tokens ("B") **with position offset S** to
-    obtain H_B (B, S, d).  Build [C ; H_B] (B, T+S, d) and run layers L+1..end
-    to compute logits over T+S positions. Compute LM loss **only over B** tokens
-    (ignore the C prefix). This loss updates the base model and the compressor
-    (upsampler is not used in this branch).
-
-Notes / assumptions:
-  • The base model is LLaMA-like (Hugging Face style), with attributes:
-      base.model.embed_tokens, base.model.layers (list), base.model.norm, base.lm_head
-    and with blocks that accept (hidden_states, attention_mask, position_ids, ...).
-    If your blocks have a different forward signature, adapt _block_forward().
-  • Rotary / positional encoding: we provide explicit position_ids so "B" sees
-    position indices offset by S in the lower (0..L) stack. Above L, when we
-    concatenate [C ; H_B], the causal mask is constructed so "B" can attend to
-    "C" and its own previous tokens but not vice versa.
-  • The compressor and upsampler modules are imported from your bento/fla
-    implementation. We perform a flexible import so you can name the modules
-    as you like. See _load_joyce_modules().
-
-Author: (drop-in for your repo)
+This script intentionally avoids framework-specific trainers and uses only PyTorch + HF Datasets/Transformers.
 """
-from __future__ import annotations
 
+from __future__ import annotations
 import os
-import sys
 import math
 import time
-import json
-import types
-import random
-import inspect
 import argparse
-from dataclasses import dataclass
-from typing import Optional, Tuple, List
+from typing import Optional, Iterable, Dict, Any
 
 import torch
 import torch.nn as nn
-from torch.nn import functional as F
-from torch.utils.data import DataLoader
+import torch.nn.functional as F
+from torch.utils.data import IterableDataset, DataLoader
 
-try:
-    from datasets import load_dataset
-    HAS_DATASETS = True
-except Exception:
-    HAS_DATASETS = False
+from datasets import load_dataset
+from transformers import AutoTokenizer, AutoConfig, AutoModelForCausalLM
 
-try:
-    from transformers import AutoTokenizer, AutoConfig, AutoModelForCausalLM, set_seed
-    HAS_TRANSFORMERS = True
-except Exception:
-    HAS_TRANSFORMERS = False
+# --- Import Joyce blocks from your bento submodule ---
+# Path: 3rdparty/bento/fla/layers/joyce.py
+from fla.layers.joyce import (
+    JoyceBlockCfg, JoyceCompressionBlock, JoyceUpsamplingBlock
+)
 
 
-# ------------------------------------------------------------------------------------
-# Utilities
-# ------------------------------------------------------------------------------------
+# ----------------------- Utilities -----------------------
 
-def add_bento_to_sys_path(repo_root: str):
+def set_seed(seed: int):
+    import random, numpy as np
+    random.seed(seed); np.random.seed(seed); torch.manual_seed(seed); torch.cuda.manual_seed_all(seed)
+
+
+def save_checkpoint(
+    save_dir: str,
+    step: int,
+    base_model: nn.Module,
+    compress: nn.Module,
+    upsample: nn.Module,
+):
+    os.makedirs(save_dir, exist_ok=True)
+    step_dir = os.path.join(save_dir, f"checkpoint-{step}")
+    os.makedirs(step_dir, exist_ok=True)
+
+    # save torch weights
+    base_model.save_pretrained(step_dir)  # works for HF models
+    torch.save(compress.state_dict(), os.path.join(step_dir, "compressor.pt"))
+    torch.save(upsample.state_dict(), os.path.join(step_dir, "upsampler.pt"))
+    print(f"[ckpt] saved to {step_dir}")
+
+
+def maybe_load_state_dict(module: nn.Module, path: Optional[str]):
+    if not path:
+        return
+    ckpt = torch.load(path, map_location="cpu")
+    # Accept plain state_dict OR a packaged dict
+    sd = ckpt
+    if isinstance(ckpt, dict) and "state_dict" in ckpt:
+        sd = ckpt["state_dict"]
+    try:
+        module.load_state_dict(sd, strict=True)
+    except RuntimeError:
+        # try to fish submodule keys (e.g., saved as "compress.xxx")
+        prefix = "compress." if any(k.startswith("compress.") for k in sd) else "upsample."
+        sub_sd = {k[len(prefix):]: v for k, v in sd.items() if k.startswith(prefix)}
+        module.load_state_dict(sub_sd, strict=False)
+
+
+# ----------------------- Dataset (streaming) -----------------------
+
+class StreamingSequenceDataset(IterableDataset):
     """
-    Add 3rdparty/bento to sys.path so we can import modules from the submodule.
+    Streams a text dataset and yields fixed-length sequences of token ids.
+    Each sample has length = block_size (we expect block_size = 2 * seq_len).
     """
-    candidate = os.path.join(repo_root, "3rdparty", "bento")
-    if os.path.isdir(candidate) and candidate not in sys.path:
-        sys.path.insert(0, candidate)
-
-
-def maybe_all_reduce_mean(t: torch.Tensor) -> torch.Tensor:
-    if torch.distributed.is_available() and torch.distributed.is_initialized():
-        torch.distributed.all_reduce(t, op=torch.distributed.ReduceOp.SUM)
-        t = t / torch.distributed.get_world_size()
-    return t
-
-
-def setup_ddp(args):
-    if args.distributed and torch.cuda.is_available():
-        # infer if launched with torchrun
-        if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
-            torch.distributed.init_process_group(backend="nccl")
-            torch.cuda.set_device(int(os.environ.get("LOCAL_RANK", "0")))
-            args.rank = int(os.environ["RANK"])
-            args.world_size = int(os.environ["WORLD_SIZE"])
-            args.local_rank = int(os.environ.get("LOCAL_RANK", "0"))
-        else:
-            # single-process fallback
-            args.distributed = False
-            args.rank = 0
-            args.world_size = 1
-            args.local_rank = 0
-    else:
-        args.distributed = False
-        args.rank = 0
-        args.world_size = 1
-        args.local_rank = 0
-
-
-def is_main(args) -> bool:
-    return (not args.distributed) or (args.rank == 0)
-
-
-# ------------------------------------------------------------------------------------
-# Joyce module loader (import from bento/fla or a local path)
-# ------------------------------------------------------------------------------------
-
-def _load_joyce_modules(args):
-    """
-    Attempt to import compressor & upsampler from your submodule.
-    You can adapt names here to match your concrete implementation.
-
-    Expected classes:
-      - JoyceCompressor: nn.Module with forward(hidden_states: (B,S,d)) -> (B,T,d)
-      - JoyceUpSampler:  nn.Module with forward(compressed: (B,T,d), seq_len: int) -> (B,S,d)
-    """
-    import_errors = []
-    # Try common paths
-    candidate_imports = [
-        ("fla.models.joyce", "JoyceCompressor", "JoyceUpSampler"),
-        ("fla.models.joyce", "JoyceCompression", "JoyceUpSampling"),
-        ("bento.fla.models.joyce", "JoyceCompressor", "JoyceUpSampler"),
-        ("bento.fla.models.joyce", "JoyceCompression", "JoyceUpSampling"),
-        ("fla.models", "JoyceCompressor", "JoyceUpSampler"),
-        ("fla.models", "JoyceCompression", "JoyceUpSampling"),
-    ]
-    for mod_name, comp_name, up_name in candidate_imports:
-        try:
-            mod = __import__(mod_name, fromlist=[comp_name, up_name])
-            Compressor = getattr(mod, comp_name)
-            UpSampler = getattr(mod, up_name)
-            return Compressor, UpSampler
-        except Exception as e:
-            import_errors.append(f"{mod_name}: {e!r}")
-    raise ImportError(
-        "Could not import Joyce compressor/upsampler modules. Tried:\n  - "
-        + "\n  - ".join(import_errors)
-    )
-
-
-# ------------------------------------------------------------------------------------
-# Model "split" helpers for LLaMA-style models
-# ------------------------------------------------------------------------------------
-
-@dataclass
-class SplitHandles:
-    embed_tokens: nn.Module
-    layers: List[nn.Module]
-    norm: nn.Module
-    lm_head: nn.Linear
-    hidden_size: int
-
-
-def _get_split_handles(base: nn.Module) -> SplitHandles:
-    """
-    Extracts references to embed -> layers -> norm -> lm_head from a LLaMA-like model.
-    Works for Hugging Face LLaMA-based classes where `base.model` holds the stack.
-    """
-    if not hasattr(base, "model"):
-        raise AttributeError("Base model missing `.model` attribute (expected HF LLaMA-like).")
-    core = base.model
-    for attr in ["embed_tokens", "layers", "norm"]:
-        if not hasattr(core, attr):
-            raise AttributeError(f"Base model `.model` missing `{attr}` attribute.")
-    if not hasattr(base, "lm_head"):
-        raise AttributeError("Base model missing `lm_head` attribute.")
-    layers = core.layers
-    hidden_size = getattr(core, "hidden_size", None) or getattr(core, "hidden_dim", None)
-    if hidden_size is None:
-        # try to infer from first layer norm or an attn dim
-        try:
-            sample = next(core.layers[0].parameters())
-            hidden_size = sample.shape[-1]
-        except Exception:
-            raise AttributeError("Could not infer hidden size; please set `core.hidden_size`.")
-    return SplitHandles(
-        embed_tokens=core.embed_tokens,
-        layers=list(layers),
-        norm=core.norm,
-        lm_head=base.lm_head,
-        hidden_size=hidden_size,
-    )
-
-
-def _maybe_get_block_argspec(block: nn.Module):
-    sig = inspect.signature(block.forward)
-    return sig
-
-
-def _block_forward(block: nn.Module, hidden_states: torch.Tensor,
-                   attention_mask: Optional[torch.Tensor] = None,
-                   position_ids: Optional[torch.Tensor] = None,
-                   **kwargs) -> torch.Tensor:
-    """
-    Call a transformer block in a way that tolerates different forward signatures.
-    """
-    sig = _maybe_get_block_argspec(block)
-    fwd_kwargs = {}
-    if "attention_mask" in sig.parameters:
-        fwd_kwargs["attention_mask"] = attention_mask
-    if "position_ids" in sig.parameters:
-        fwd_kwargs["position_ids"] = position_ids
-    # common flags
-    if "use_cache" in sig.parameters:
-        fwd_kwargs["use_cache"] = False
-    if "past_key_value" in sig.parameters:
-        fwd_kwargs["past_key_value"] = None
-    # allow any extra kwargs to flow if supported
-    for k, v in kwargs.items():
-        if k in sig.parameters:
-            fwd_kwargs[k] = v
-    out = block(hidden_states, **fwd_kwargs)
-    # Some blocks return tuple (hidden_states, ...) and others just hidden_states
-    if isinstance(out, tuple):
-        return out[0]
-    return out
-
-
-def run_layers_range(handles: SplitHandles,
-                     x: torch.Tensor,
-                     start: int,
-                     end: int,
-                     attention_mask: Optional[torch.Tensor] = None,
-                     position_ids: Optional[torch.Tensor] = None) -> torch.Tensor:
-    """
-    Run a contiguous range of transformer blocks [start, end) on `x`.
-    """
-    for i in range(start, end):
-        x = _block_forward(handles.layers[i], x, attention_mask=attention_mask, position_ids=position_ids)
-    return x
-
-
-def build_causal_mask(B: int, S: int, device, dtype=torch.float32) -> torch.Tensor:
-    """
-    Standard causal mask for sequence length S. Shape (B, 1, S, S) in HF convention.
-    """
-    mask = torch.full((S, S), fill_value=-float("inf"), device=device, dtype=dtype)
-    mask = torch.triu(mask, diagonal=1)  # upper triangular (i<j allowed)
-    mask = mask.unsqueeze(0).unsqueeze(0).expand(B, 1, S, S)
-    return mask
-
-
-def build_causal_mask_with_prefix(B: int, T: int, S: int, device, dtype=torch.float32) -> torch.Tensor:
-    """
-    Causal mask for concatenated sequence [C (T); B (S)].
-    - C tokens can attend among themselves (lower triangle in T-by-T).
-    - B tokens can attend to all C and previous B tokens.
-    Shape (B,1,T+S,T+S).
-    """
-    total = T + S
-    m = torch.full((total, total), fill_value=-float("inf"), device=device, dtype=dtype)
-    # Allow attention to previous positions (including same group)
-    m = torch.triu(m, diagonal=1)  # (i<j) masked
-    m = m.clone()
-    # No special changes needed; the standard causal mask already allows positions i to attend to [0..i].
-    # With [C;B], B positions (>=T) can attend to C (indices < T) and previous B positions.
-    m = m.unsqueeze(0).unsqueeze(0).expand(B, 1, total, total)
-    return m
-
-
-# ------------------------------------------------------------------------------------
-# Data
-# ------------------------------------------------------------------------------------
-
-class StreamingTextDataset(torch.utils.data.IterableDataset):
-    """
-    Minimal iterable dataset that yields tokenized, concatenated chunks of length 2*seq_len.
-    Uses Hugging Face datasets streaming for large corpora if available.
-    """
-    def __init__(self, tokenizer, dataset_name_or_path: str, split: str,
-                 seq_len: int, seed: int = 42, text_key: str = "text"):
+    def __init__(
+        self,
+        dataset_name: str,
+        split: str,
+        tokenizer: AutoTokenizer,
+        text_key: str,
+        block_size: int,
+        streaming: bool = True,
+        bos_token_id: Optional[int] = None,
+        eos_token_id: Optional[int] = None,
+    ):
         super().__init__()
-        assert HAS_DATASETS, "Install `datasets` to use StreamingTextDataset."
+        self.dataset_name = dataset_name
+        self.split = split
         self.tokenizer = tokenizer
-        self.seq_len = seq_len
-        self.total_len = 2 * seq_len
         self.text_key = text_key
-        self.ds = load_dataset(dataset_name_or_path, split=split, streaming=True)
-        self.rng = random.Random(seed)
+        self.block_size = block_size
+        self.streaming = streaming
+        self.bos_token_id = bos_token_id
+        self.eos_token_id = eos_token_id
 
-    def __iter__(self):
-        buffer = []
-        for ex in self.ds:
-            txt = ex.get(self.text_key, None)
-            if not txt:
-                continue
-            ids = self.tokenizer(txt, add_special_tokens=False, return_attention_mask=False)["input_ids"]
-            buffer.extend(ids)
-            while len(buffer) >= self.total_len + 1:
-                chunk = buffer[: self.total_len + 1]  # +1 for next-token shift
-                buffer = buffer[self.total_len:]
-                input_ids = torch.tensor(chunk[:-1], dtype=torch.long)
-                labels = torch.tensor(chunk[1:], dtype=torch.long)
-                yield {"input_ids": input_ids, "labels": labels}
+    def __iter__(self) -> Iterable[Dict[str, torch.Tensor]]:
+        ds = load_dataset(self.dataset_name, split=self.split, streaming=self.streaming)
+
+        buf = []
+        for ex in ds:
+            text = ex[self.text_key]
+            ids = self.tokenizer.encode(text, add_special_tokens=False)
+            if self.bos_token_id is not None:
+                buf.append(self.bos_token_id)
+            buf.extend(ids)
+            if self.eos_token_id is not None:
+                buf.append(self.eos_token_id)
+
+            while len(buf) >= self.block_size:
+                chunk = buf[:self.block_size]
+                buf = buf[self.block_size:]
+                yield {
+                    "input_ids": torch.tensor(chunk, dtype=torch.long)
+                }
 
 
-def collate_batch(examples: List[dict]) -> dict:
-    # stack to (B, 2S) for both input_ids and labels
-    input_ids = torch.stack([e["input_ids"] for e in examples], dim=0)
-    labels = torch.stack([e["labels"] for e in examples], dim=0)
-    return {"input_ids": input_ids, "labels": labels}
+# ----------------------- Base model adapter -----------------------
 
-
-# ------------------------------------------------------------------------------------
-# Training step implementing Joyce combined losses
-# ------------------------------------------------------------------------------------
-
-def joint_forward_loss(
-    base,
-    handles: SplitHandles,
-    compressor: nn.Module,
-    upsampler: nn.Module,
-    input_ids: torch.Tensor,   # (B, 2S)
-    labels: torch.Tensor,      # (B, 2S)
-    L: int,
-    num_compressed_states: int,
-    ignore_index: int = -100,
-) -> Tuple[torch.Tensor, dict]:
+class _BaseStackAdapter:
     """
-    Compute the two-branch joint loss described in the Joyce write-up.
-    Returns (total_loss, metrics_dict).
+    Small shim to run layers [start:end] and access embeddings/lm_head
+    without editing the underlying model code.
     """
-    device = input_ids.device
-    B, twoS = input_ids.shape
-    assert twoS % 2 == 0, "Expect even sequence length."
-    S = twoS // 2
-    T = num_compressed_states
+    def __init__(self, base_model: nn.Module):
+        self.base = base_model
 
-    # Split into A (first S) and B (last S)
-    ids_A = input_ids[:, :S]                  # (B,S)
-    ids_B = input_ids[:, S:]                  # (B,S)
-    labels_A = labels[:, :S]                  # (B,S)
-    labels_B = labels[:, S:]                  # (B,S)
+        # embeddings
+        if hasattr(base_model, "get_input_embeddings"):
+            self.tok_embed = base_model.get_input_embeddings()
+        elif hasattr(base_model, "model") and hasattr(base_model.model, "embed_tokens"):
+            self.tok_embed = base_model.model.embed_tokens
+        else:
+            raise AttributeError("Could not find token embedding on base model")
 
-    # Embeddings
-    # NOTE: many LLaMA-like models embed in core.model.embed_tokens
-    x_A = handles.embed_tokens(ids_A)         # (B,S,d)
-    x_B = handles.embed_tokens(ids_B)         # (B,S,d)
+        # block list
+        self.layers = (
+            getattr(getattr(base_model, "model", base_model), "layers", None)
+            or getattr(getattr(base_model, "transformer", base_model), "layers", None)
+            or getattr(getattr(base_model, "model", base_model), "h", None)
+            or getattr(getattr(base_model, "transformer", base_model), "h", None)
+            or getattr(base_model, "layers", None)
+        )
+        if not isinstance(self.layers, (list, nn.ModuleList)):
+            raise AttributeError("Could not find decoder layers list on base model")
 
-    # Build causal masks for lower stack (A-only and B-only)
-    attn_A = build_causal_mask(B, S, device=device, dtype=x_A.dtype)
-    # For B lower-stack, we also want a causal mask of size S, but with position offset S.
-    # Position IDs: (B,S) with offset
-    position_ids_A = torch.arange(0, S, device=device).unsqueeze(0).expand(B, S)
-    position_ids_B = torch.arange(S, 2*S, device=device).unsqueeze(0).expand(B, S)
+        # final norm
+        self.final_norm = (
+            getattr(getattr(base_model, "model", base_model), "norm", None)
+            or getattr(base_model, "norm", None)
+            or getattr(getattr(base_model, "transformer", base_model), "ln_f", None)
+            or getattr(base_model, "ln_f", None)
+        )
+        if self.final_norm is None:
+            raise AttributeError("Could not find final norm on base model")
 
-    # Run 0..L on A and B separately (avoid leakage below L)
-    h_A_L = run_layers_range(handles, x_A, start=0, end=L, attention_mask=attn_A, position_ids=position_ids_A)
-    h_B_L = run_layers_range(handles, x_B, start=0, end=L, attention_mask=attn_A, position_ids=position_ids_B)
+        # lm head
+        if hasattr(base_model, "lm_head"):
+            self.lm_head = base_model.lm_head
+        elif hasattr(base_model, "get_output_embeddings"):
+            self.lm_head = base_model.get_output_embeddings()
+        else:
+            raise AttributeError("Could not find lm_head on base model")
 
-    # Compress A
-    C = compressor(h_A_L)                     # (B,T,d)
+    def _call_block(self, block: nn.Module, x: torch.Tensor, position_ids: Optional[torch.Tensor]) -> torch.Tensor:
+        try:
+            return block(x, position_ids=position_ids, use_cache=False)
+        except TypeError:
+            try:
+                return block(x, position_ids=position_ids)
+            except TypeError:
+                return block(x)
 
-    # ---------------------- Branch 1: A -> compress -> upsample -> top ----------------------
-    U_A = upsampler(C, seq_len=S)             # (B,S,d)
-    # Run L..end on U_A (include block L if your "insert" is AFTER L; we proceed with L+1)
-    h_A_top = run_layers_range(handles, U_A, start=L, end=len(handles.layers),
-                               attention_mask=attn_A, position_ids=position_ids_A)
-    # head
-    h_A_top = handles.norm(h_A_top)           # (B,S,d)
-    logits_A = handles.lm_head(h_A_top)       # (B,S,V)
+    def embed(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.tok_embed(input_ids)
 
-    # Compute NTP loss for A
-    # shift: predict labels_A[:,1:] from logits_A[:,:-1]
-    logits_A_shift = logits_A[:, :-1, :].contiguous()
-    labels_A_shift = labels_A[:, 1:].contiguous()
-    loss_A = F.cross_entropy(
-        logits_A_shift.view(-1, logits_A_shift.size(-1)),
-        labels_A_shift.view(-1),
-        ignore_index=ignore_index
-    )
+    def run_layers(self, x: torch.Tensor, start: int, end: int, position_ids: Optional[torch.Tensor]) -> torch.Tensor:
+        for i in range(start, end):
+            x = self._call_block(self.layers[i], x, position_ids)
+        return x
 
-    # ---------------------- Branch 2: [C ; B] at layer L -> top -----------------------------
-    # Build causal mask over T+S
-    attn_CB = build_causal_mask_with_prefix(B, T=T, S=S, device=device, dtype=h_B_L.dtype)
-    # position ids for the concatenated stream above L: we keep monotonic positions
-    position_ids_CB = torch.arange(0, T + S, device=device).unsqueeze(0).expand(B, T + S)
-
-    # Concat along sequence dimension
-    H_CB_L = torch.cat([C, h_B_L], dim=1)     # (B, T+S, d)
-
-    # Run top stack
-    h_CB_top = run_layers_range(handles, H_CB_L, start=L, end=len(handles.layers),
-                                attention_mask=attn_CB, position_ids=position_ids_CB)
-    h_CB_top = handles.norm(h_CB_top)         # (B, T+S, d)
-    logits_CB = handles.lm_head(h_CB_top)     # (B, T+S, V)
-
-    # Only compute loss on the B region (skip the prefix C)
-    logits_B = logits_CB[:, T:, :]            # (B, S, V)
-    logits_B_shift = logits_B[:, :-1, :].contiguous()
-    labels_B_shift = labels_B[:, 1:].contiguous()
-    loss_B = F.cross_entropy(
-        logits_B_shift.view(-1, logits_B_shift.size(-1)),
-        labels_B_shift.view(-1),
-        ignore_index=ignore_index
-    )
-
-    total_loss = loss_A + loss_B
-    with torch.no_grad():
-        ppl_A = torch.exp(torch.clamp(loss_A, max=80.0))
-        ppl_B = torch.exp(torch.clamp(loss_B, max=80.0))
-        ppl = torch.exp(torch.clamp(total_loss, max=80.0))
-    metrics = {
-        "loss_A": loss_A.detach(),
-        "loss_B": loss_B.detach(),
-        "loss": total_loss.detach(),
-        "ppl_A": ppl_A.detach(),
-        "ppl_B": ppl_B.detach(),
-        "ppl": ppl.detach(),
-    }
-    return total_loss, metrics
+    def logits(self, h: torch.Tensor) -> torch.Tensor:
+        h = self.final_norm(h)
+        return self.lm_head(h)
 
 
-# ------------------------------------------------------------------------------------
-# Main training loop
-# ------------------------------------------------------------------------------------
+# ----------------------- Joint model wrapper -----------------------
 
-def main():
-    parser = argparse.ArgumentParser(description="Joyce Joint Training (Combined Stage)")
-    parser.add_argument("--repo_root", type=str, default=".", help="Path to adaptive-attention repo root.")
-    parser.add_argument("--model_name_or_path", type=str, required=True, help="HF base model checkpoint (pretrained).")
-    parser.add_argument("--tokenizer_name_or_path", type=str, default=None, help="HF tokenizer (defaults to model).")
-    parser.add_argument("--dataset", type=str, default=None, help="HF dataset name or path. If None, script expects you to provide your own dataloader.")
-    parser.add_argument("--dataset_split", type=str, default="train")
-    parser.add_argument("--text_key", type=str, default="text")
-    parser.add_argument("--seq_len", type=int, default=1024, help="S (half-length). Actual tokens per sample = 2*S.")
-    parser.add_argument("--layer_L", type=int, required=True, help="Index of layer after which we insert Joyce (0-based).")
-    parser.add_argument("--num_compressed_states", type=int, default=64, help="T (compressed token count).")
-    parser.add_argument("--train_steps", type=int, default=1000)
-    parser.add_argument("--batch_size", type=int, default=1)
-    parser.add_argument("--grad_accum", type=int, default=1)
-    parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--weight_decay", type=float, default=0.1)
-    parser.add_argument("--adam_beta1", type=float, default=0.9)
-    parser.add_argument("--adam_beta2", type=float, default=0.95)
-    parser.add_argument("--adam_eps", type=float, default=1e-8)
-    parser.add_argument("--warmup_steps", type=int, default=100)
-    parser.add_argument("--save_every", type=int, default=500)
-    parser.add_argument("--save_dir", type=str, default="checkpoints_joint")
-    parser.add_argument("--compressor_ckpt", type=str, default=None, help="Optional path to load compressor weights.")
-    parser.add_argument("--upsampler_ckpt", type=str, default=None, help="Optional path to load upsampler weights.")
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--fp16", action="store_true")
-    parser.add_argument("--bf16", action="store_true")
-    parser.add_argument("--distributed", action="store_true", help="Use torch.distributed (NCCL).")
-    parser.add_argument("--compile", action="store_true", help="torch.compile the joint step.")
-    args = parser.parse_args()
+class TransformerWithJoyce(nn.Module):
+    def __init__(
+        self,
+        base_model: nn.Module,
+        hidden_size: int,
+        num_heads: int,
+        latent_dim: int,
+        norm_eps: float,
+        mlp_ratio: float,
+        dropout: float,
+        seq_len: int,
+        num_compressed: int,
+        layer_L: int,
+        use_refine_attn: bool = True,
+        tie_mixers: bool = True,
+    ):
+        super().__init__()
+        self.adapter = _BaseStackAdapter(base_model)
+        self.base = base_model
 
-    setup_ddp(args)
-    if is_main(args):
-        os.makedirs(args.save_dir, exist_ok=True)
+        cfg = JoyceBlockCfg(
+            dim=hidden_size,
+            latent_dim=latent_dim,
+            num_heads=num_heads,
+            mlp_ratio=mlp_ratio,
+            dropout=dropout,
+            norm_eps=norm_eps,
+        )
+        self.compress = JoyceCompressionBlock(
+            cfg=cfg, t_in=seq_len, t_out=num_compressed, depth=1, tie_up_down=tie_mixers
+        )
+        self.upsample = JoyceUpsamplingBlock(
+            cfg=cfg, t_out=seq_len, t_in=num_compressed, depth=1,
+            tie_up_down=self.compress.mix_down if tie_mixers else None,
+            use_refine_attn=use_refine_attn
+        )
 
-    # Repro
-    if HAS_TRANSFORMERS:
-        set_seed(args.seed)
-    torch.manual_seed(args.seed)
-    random.seed(args.seed)
+        self.S = seq_len
+        self.C = num_compressed
+        self.L = layer_L
+        self.num_layers = len(self.adapter.layers)
 
-    # Add bento to import path
-    add_bento_to_sys_path(args.repo_root)
+    def _pos(self, B: int, T: int, device: torch.device, offset: int = 0) -> torch.Tensor:
+        return (torch.arange(offset, offset + T, device=device)[None, :]).expand(B, T)
 
-    # Load Joyce modules
-    CompressorCls, UpSamplerCls = _load_joyce_modules(args)
+    def forward(self, input_ids: torch.Tensor) -> Dict[str, torch.Tensor]:
+        """
+        input_ids: (B, 2*S)
+        returns: {"loss": scalar, "lossA": ..., "lossB": ...}
+        """
+        B, T = input_ids.shape
+        assert T == 2 * self.S, f"Expected input length 2*S={2*self.S}, got {T}"
+        device = input_ids.device
 
-    # Load base model + tokenizer
-    assert HAS_TRANSFORMERS, "Install transformers to run this script."
-    tok_name = args.tokenizer_name_or_path or args.model_name_or_path
-    tokenizer = AutoTokenizer.from_pretrained(tok_name, use_fast=True)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-    base = AutoModelForCausalLM.from_pretrained(args.model_name_or_path)
-    base.train()
+        # Embedding
+        h = self.adapter.embed(input_ids)  # (B, 2S, D)
 
-    # Split handles
-    handles = _get_split_handles(base)
+        # Layers 0..L
+        pos_full = self._pos(B, T, device)
+        hL = self.adapter.run_layers(h, 0, self.L + 1, pos_full)
 
-    # Instantiate Joyce blocks
-    compressor = CompressorCls(hidden_size=handles.hidden_size, num_compressed_states=args.num_compressed_states)
-    upsampler  = UpSamplerCls(hidden_size=handles.hidden_size, num_compressed_states=args.num_compressed_states)
+        # Split
+        h_first = hL[:, :self.S, :]
+        h_second = hL[:, self.S:, :]
 
-    # Optionally load pre-trained weights
-    if args.compressor_ckpt and os.path.isfile(args.compressor_ckpt):
-        sd = torch.load(args.compressor_ckpt, map_location="cpu")
-        compressor.load_state_dict(sd, strict=False)
-    if args.upsampler_ckpt and os.path.isfile(args.upsampler_ckpt):
-        sd = torch.load(args.upsampler_ckpt, map_location="cpu")
-        upsampler.load_state_dict(sd, strict=False)
+        # Compress
+        z = self.compress(h_first)  # (B, C, D)
 
-    # Move to device(s)
-    device = torch.device(f"cuda:{args.local_rank}") if torch.cuda.is_available() else torch.device("cpu")
-    base.to(device)
-    compressor.to(device)
-    upsampler.to(device)
+        # Branch A: upsample → L+1..end on length S
+        yA = self.upsample(z, x_ctx=h_first)
+        posA = self._pos(B, self.S, device)
+        yA = self.adapter.run_layers(yA, self.L + 1, self.num_layers, posA)
+        logitsA = self.adapter.logits(yA)  # (B, S, V)
+        lossA = self._ntp_ce(logitsA, input_ids[:, :self.S])
 
-    if args.fp16:
-        scaler = torch.cuda.amp.GradScaler(enabled=True)
-    else:
-        scaler = None
+        # Branch B: prepend z to second window → L+1..end
+        yB_in = torch.cat([z, h_second], dim=1)  # (B, C+S, D)
+        posB = self._pos(B, self.C + self.S, device)
+        yB = self.adapter.run_layers(yB_in, self.L + 1, self.num_layers, posB)
+        logitsB = self.adapter.logits(yB)        # (B, C+S, V)
+        logitsB_tail = logitsB[:, self.C:, :]    # only the last S
+        lossB = self._ntp_ce(logitsB_tail, input_ids[:, self.S:])
 
-    # Optimizer (base + compressor + upsampler)
-    # Weight decay only for non-norm, non-bias params
-    def param_groups(module: nn.Module):
-        decay, no_decay = [], []
-        for n, p in module.named_parameters():
-            if not p.requires_grad:
-                continue
-            if any(nd in n for nd in ["bias", "norm", "ln_", "layernorm", "LayerNorm"]):
-                no_decay.append(p)
-            else:
-                decay.append(p)
-        return [{"params": decay, "weight_decay": args.weight_decay},
-                {"params": no_decay, "weight_decay": 0.0}]
+        loss = 0.5 * (lossA + lossB)
+        return {
+            "loss": loss,
+            "lossA": lossA.detach(),
+            "lossB": lossB.detach(),
+            "loss_first_half": lossA.detach(),
+            "loss_second_half": lossB.detach(),
+        }
 
+    @staticmethod
+    def _ntp_ce(logits: torch.Tensor, input_ids_window: torch.Tensor) -> torch.Tensor:
+        B, T, V = logits.shape
+        tgt = input_ids_window[:, 1:].contiguous().view(B * (T - 1))
+        pred = logits[:, :-1, :].contiguous().view(B * (T - 1), V)
+        return F.cross_entropy(pred, tgt, reduction="mean")
+
+
+# ----------------------- Training loop -----------------------
+
+def train(args: argparse.Namespace):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    set_seed(42)
+
+    wandb_module = None
+    if args.enable_wandb:
+        try:
+            import wandb  # type: ignore
+
+            wandb_module = wandb
+            project = args.wandb_project or os.getenv("WANDB_PROJECT") or "joyce-joint"
+            entity = args.wandb_entity or os.getenv("WANDB_ENTITY")
+            mode = args.wandb_mode or os.getenv("WANDB_MODE")
+            run_name = args.wandb_run_name or os.getenv("WANDB_NAME")
+            tags = args.wandb_tags or []
+
+            init_kwargs: Dict[str, Any] = {
+                "project": project,
+                "config": {
+                    "model_name_or_path": args.model_name_or_path,
+                    "tokenizer_name_or_path": args.tokenizer_name_or_path,
+                    "dataset": args.dataset,
+                    "dataset_split": args.dataset_split,
+                    "text_key": args.text_key,
+                    "seq_len": args.seq_len,
+                    "layer_L": args.layer_L,
+                    "num_compressed_states": args.num_compressed_states,
+                    "latent_dim": args.latent_dim,
+                    "mlp_ratio": args.mlp_ratio,
+                    "dropout": args.dropout,
+                    "num_compressed": args.num_compressed_states,
+                    "warmup_steps": args.warmup_steps,
+                    "train_steps": args.train_steps,
+                    "batch_size": args.batch_size,
+                    "grad_accum": args.grad_accum,
+                    "lr": args.lr,
+                    "fp16": args.fp16,
+                    "save_every": args.save_every,
+                },
+            }
+            if entity:
+                init_kwargs["entity"] = entity
+            if mode:
+                init_kwargs["mode"] = mode
+            if run_name:
+                init_kwargs["name"] = run_name
+            if tags:
+                init_kwargs["tags"] = tags
+
+            wandb_run = wandb_module.init(**init_kwargs)
+            wandb_module.define_metric("train/step")
+            wandb_module.define_metric("train/*", step_metric="train/step")
+        except ModuleNotFoundError:
+            print("⚠️  wandb not installed. Install with: pip install wandb")
+        except Exception as exc:
+            print(f"⚠️  Failed to init wandb ({exc}). Continuing without wandb logging.")
+            wandb_module = None
+
+    # Tokenizer
+    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_name_or_path, use_fast=True)
+    bos_id = tokenizer.bos_token_id if tokenizer.bos_token_id is not None else args.bos_token_id
+    eos_id = tokenizer.eos_token_id if tokenizer.eos_token_id is not None else args.eos_token_id
+
+    # Base model
+    base_cfg = AutoConfig.from_pretrained(args.model_name_or_path, trust_remote_code=True)
+    base_model = AutoModelForCausalLM.from_pretrained(args.model_name_or_path, config=base_cfg, trust_remote_code=True)
+    base_model.to(device)
+
+    # Joyce wrapper
+    model = TransformerWithJoyce(
+        base_model=base_model,
+        hidden_size=getattr(base_cfg, "hidden_size"),
+        num_heads=getattr(base_cfg, "num_attention_heads", None) or getattr(base_cfg, "num_heads"),
+        latent_dim=args.latent_dim,
+        norm_eps=getattr(base_cfg, "rms_norm_eps", None) or getattr(base_cfg, "norm_eps", 1e-6),
+        mlp_ratio=args.mlp_ratio,
+        dropout=args.dropout,
+        seq_len=args.seq_len,
+        num_compressed=args.num_compressed_states,
+        layer_L=args.layer_L,
+        use_refine_attn=not args.no_refine_attn,
+        tie_mixers=not args.no_tie_mixers,
+    ).to(device)
+
+    # Optionally load compressor/upsampler init (from AE pretraining)
+    maybe_load_state_dict(model.compress, args.compressor_ckpt)
+    maybe_load_state_dict(model.upsample, args.upsampler_ckpt)
+
+    # Optimizer
     optim = torch.optim.AdamW(
-        param_groups(base) + param_groups(compressor) + param_groups(upsampler),
-        lr=args.lr, betas=(args.adam_beta1, args.adam_beta2), eps=args.adam_eps
+        (p for p in model.parameters() if p.requires_grad),
+        lr=args.lr, betas=(0.9, 0.95), eps=1e-8, weight_decay=0.1
     )
 
-    # Cosine LR with warmup
+    # Scheduler: linear warmup, cosine decay
     def lr_lambda(step):
         if step < args.warmup_steps:
-            return float(step) / max(1, args.warmup_steps)
-        progress = float(step - args.warmup_steps) / max(1, args.train_steps - args.warmup_steps)
-        return max(0.0, 0.5 * (1.0 + math.cos(math.pi * progress)))
-
+            return step / max(1, args.warmup_steps)
+        progress = (step - args.warmup_steps) / max(1, args.train_steps - args.warmup_steps)
+        progress = min(max(progress, 0.0), 1.0)
+        return 0.5 * (1.0 + math.cos(math.pi * progress))
     scheduler = torch.optim.lr_scheduler.LambdaLR(optim, lr_lambda=lr_lambda)
 
     # Data
-    if args.dataset is None:
-        raise ValueError("Please provide --dataset (HF datasets name or local dataset script).")
-    ds = StreamingTextDataset(tokenizer, args.dataset, split=args.dataset_split,
-                              seq_len=args.seq_len, seed=args.seed, text_key=args.text_key)
-    dl = DataLoader(ds, batch_size=args.batch_size, collate_fn=collate_batch)
+    block_size = 2 * args.seq_len
+    ds = StreamingSequenceDataset(
+        dataset_name=args.dataset,
+        split=args.dataset_split,
+        tokenizer=tokenizer,
+        text_key=args.text_key,
+        block_size=block_size,
+        streaming=True,
+        bos_token_id=bos_id,
+        eos_token_id=eos_id,
+    )
+    dl = DataLoader(ds, batch_size=args.batch_size, num_workers=2)
 
-    # Optionally compile the joint forward for speed
-    joint_fn = joint_forward_loss
-    if args.compile and hasattr(torch, "compile"):
-        joint_fn = torch.compile(joint_fn, mode="max-autotune")
+    # AMP
+    use_fp16 = args.fp16
+    scaler = torch.cuda.amp.GradScaler(enabled=use_fp16)
 
-    # Training loop
-    step = 0
-    running = {"loss": 0.0, "loss_A": 0.0, "loss_B": 0.0}
-    start_time = time.time()
-
-    base.zero_grad(set_to_none=True)
-    compressor.zero_grad(set_to_none=True)
-    upsampler.zero_grad(set_to_none=True)
+    # Training
+    model.train()
+    step, tok_loss_avg = 0, 0.0
+    optim.zero_grad(set_to_none=True)
+    step_start_time = time.time()
 
     for batch in dl:
-        if step >= args.train_steps:
-            break
-        input_ids = batch["input_ids"].to(device, non_blocking=True)
-        labels    = batch["labels"].to(device, non_blocking=True)
+        input_ids = batch["input_ids"].to(device, non_blocking=True)  # (B, 2*S)
+        with torch.cuda.amp.autocast(enabled=use_fp16, dtype=torch.float16):
+            out = model(input_ids)
+            loss = out["loss"] / args.grad_accum
 
-        # FP16 mixed precision if requested
-        if scaler is not None:
-            with torch.cuda.amp.autocast():
-                loss, metrics = joint_fn(
-                    base, handles, compressor, upsampler,
-                    input_ids, labels, L=args.layer_L, num_compressed_states=args.num_compressed_states
-                )
-            scaler.scale(loss / args.grad_accum).backward()
-        else:
-            loss, metrics = joint_fn(
-                base, handles, compressor, upsampler,
-                input_ids, labels, L=args.layer_L, num_compressed_states=args.num_compressed_states
-            )
-            (loss / args.grad_accum).backward()
+        scaler.scale(loss).backward()
 
-        # Log running averages (main process only)
-        running["loss"] += metrics["loss"].item()
-        running["loss_A"] += metrics["loss_A"].item()
-        running["loss_B"] += metrics["loss_B"].item()
-
+        grad_norm_val = None
         if (step + 1) % args.grad_accum == 0:
-            if scaler is not None:
-                scaler.step(optim)
-                scaler.update()
-            else:
-                optim.step()
+            # clip
+            grad_norm_val = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            scaler.step(optim)
+            scaler.update()
             optim.zero_grad(set_to_none=True)
             scheduler.step()
 
-        if is_main(args) and (step % 20 == 0):
-            elapsed = time.time() - start_time
-            avg_loss = running["loss"] / max(1, step + 1)
-            avg_A = running["loss_A"] / max(1, step + 1)
-            avg_B = running["loss_B"] / max(1, step + 1)
-            lr_now = scheduler.get_last_lr()[0]
-            print(f"[step {step:06d}] loss={avg_loss:.4f} (A={avg_A:.4f}, B={avg_B:.4f})  lr={lr_now:.2e}  elapsed={elapsed:.1f}s")
-
-        if is_main(args) and (step > 0) and (step % args.save_every == 0):
-            ckpt_dir = os.path.join(args.save_dir, f"step_{step:06d}")
-            os.makedirs(ckpt_dir, exist_ok=True)
-            torch.save(base.state_dict(), os.path.join(ckpt_dir, "base.pt"))
-            torch.save(compressor.state_dict(), os.path.join(ckpt_dir, "compressor.pt"))
-            torch.save(upsampler.state_dict(), os.path.join(ckpt_dir, "upsampler.pt"))
-            with open(os.path.join(ckpt_dir, "config.json"), "w") as f:
-                json.dump(vars(args), f, indent=2)
-            print(f"Saved checkpoint to: {ckpt_dir}")
-
         step += 1
+        tok_loss_avg = 0.9 * tok_loss_avg + 0.1 * out["loss"].item()
+        now = time.time()
+        step_time = now - step_start_time
+        tokens_this_step = input_ids.numel()
 
-    # Final save
-    if is_main(args):
-        ckpt_dir = os.path.join(args.save_dir, "final")
-        os.makedirs(ckpt_dir, exist_ok=True)
-        torch.save(base.state_dict(), os.path.join(ckpt_dir, "base.pt"))
-        torch.save(compressor.state_dict(), os.path.join(ckpt_dir, "compressor.pt"))
-        torch.save(upsampler.state_dict(), os.path.join(ckpt_dir, "upsampler.pt"))
-        with open(os.path.join(ckpt_dir, "config.json"), "w") as f:
-            json.dump(vars(args), f, indent=2)
-        print(f"Training completed. Final checkpoint -> {ckpt_dir}")
+        if step % 10 == 0:
+            print(
+                f"[step {step}] loss={out['loss'].item():.4f}  ema={tok_loss_avg:.4f}  "
+                f"first_half_loss={out['loss_first_half'].item():.4f} "
+                f"second_half_loss={out['loss_second_half'].item():.4f}  lr={scheduler.get_last_lr()[0]:.2e}"
+            )
+
+        if wandb_module:
+            log_data = {
+                "train/step": step,
+                "train/loss": out["loss"].item(),
+                "train/lossA": out["lossA"].item(),
+                "train/lossB": out["lossB"].item(),
+                "train/loss_first_half": out["loss_first_half"].item(),
+                "train/loss_second_half": out["loss_second_half"].item(),
+                "train/ema_loss": tok_loss_avg,
+                "train/lr": optim.param_groups[0]["lr"],
+                "train/tokens": tokens_this_step,
+                "train/tokens_per_sec": tokens_this_step / step_time if step_time > 0 else float("inf"),
+                "train/step_time_s": step_time,
+            }
+            if grad_norm_val is not None:
+                log_data["train/grad_norm"] = float(grad_norm_val)
+            wandb_module.log(log_data, step=step)
+        step_start_time = now
+
+        if (args.save_every > 0) and (step % args.save_every == 0):
+            save_checkpoint(args.save_dir, step, base_model, model.compress, model.upsample)
+
+        if step >= args.train_steps:
+            break
+
+    # final save
+    save_checkpoint(args.save_dir, step, base_model, model.compress, model.upsample)
+    if wandb_module:
+        final_log = {"train/step": step}
+        if "out" in locals():
+            final_log["train/final_loss"] = out["loss"].item()
+        wandb_module.log(final_log, step=step)
+        wandb_module.finish()
+    print("[Joyce Joint] done.")
+
+
+# ----------------------- CLI -----------------------
+
+def build_argparser():
+    p = argparse.ArgumentParser()
+    p.add_argument("--repo_root", type=str, default=".")
+    p.add_argument("--model_name_or_path", type=str, required=True)
+    p.add_argument("--tokenizer_name_or_path", type=str, required=True)
+
+    p.add_argument("--dataset", type=str, required=True)
+    p.add_argument("--dataset_split", type=str, default="train")
+    p.add_argument("--text_key", type=str, default="text")
+
+    # Geometry
+    p.add_argument("--seq_len", type=int, required=True, help="Half-window S (total length per sample = 2*S).")
+    p.add_argument("--layer_L", type=int, required=True)
+    p.add_argument("--num_compressed_states", type=int, required=True)
+    p.add_argument("--latent_dim", type=int, default=256)
+    p.add_argument("--mlp_ratio", type=float, default=4.0)
+    p.add_argument("--dropout", type=float, default=0.0)
+    p.add_argument("--no_refine_attn", action="store_true")
+    p.add_argument("--no_tie_mixers", action="store_true")
+
+    # Optim
+    p.add_argument("--warmup_steps", type=int, default=1000)
+    p.add_argument("--train_steps", type=int, default=30000)
+    p.add_argument("--batch_size", type=int, default=1)
+    p.add_argument("--grad_accum", type=int, default=16)
+    p.add_argument("--lr", type=float, default=1e-4)
+
+    # Checkpointing
+    p.add_argument("--save_every", type=int, default=500)
+    p.add_argument("--save_dir", type=str, default="checkpoints_joint")
+    p.add_argument("--compressor_ckpt", type=str, default=None)
+    p.add_argument("--upsampler_ckpt", type=str, default=None)
+
+    # Tokens
+    p.add_argument("--bos_token_id", type=int, default=None)
+    p.add_argument("--eos_token_id", type=int, default=None)
+
+    # Precision
+    p.add_argument("--fp16", action="store_true")
+
+    # WandB
+    p.add_argument("--enable_wandb", action="store_true", help="Enable Weights & Biases logging.")
+    p.add_argument("--wandb_project", type=str, default=None, help="Weights & Biases project name.")
+    p.add_argument("--wandb_entity", type=str, default=None, help="Weights & Biases entity (team or username).")
+    p.add_argument("--wandb_run_name", type=str, default=None, help="Optional run name for WandB.")
+    p.add_argument("--wandb_tags", type=str, nargs="*", default=None, help="Optional tags for the WandB run.")
+    p.add_argument("--wandb_mode", type=str, default=None, help="WandB mode (online, offline, disabled).")
+    return p
 
 
 if __name__ == "__main__":
-    main()
+    args = build_argparser().parse_args()
+    train(args)

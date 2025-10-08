@@ -28,6 +28,40 @@ git submodule update --init --recursive
 # Replace <> placeholders below with your actual paths/checkpoints.
 # ------------------------------------------------------------------------------
 
+ENABLE_WANDB=${ENABLE_WANDB:-0}
+WANDB_ARGS=()
+if [[ "${ENABLE_WANDB}" == "1" ]]; then
+  echo "[Joyce Joint Training] WandB logging enabled."
+  if [[ -n "${WANDB_PROJECT:-}" ]]; then
+    WANDB_ARGS+=(--wandb_project "${WANDB_PROJECT}")
+  fi
+  if [[ -n "${WANDB_ENTITY:-}" ]]; then
+    WANDB_ARGS+=(--wandb_entity "${WANDB_ENTITY}")
+  fi
+  if [[ -n "${WANDB_RUN_NAME:-}" ]]; then
+    WANDB_ARGS+=(--wandb_run_name "${WANDB_RUN_NAME}")
+  fi
+  if [[ -n "${WANDB_MODE:-}" ]]; then
+    WANDB_ARGS+=(--wandb_mode "${WANDB_MODE}")
+  fi
+  if [[ -n "${WANDB_TAGS:-}" ]]; then
+    OLD_IFS=$IFS
+    IFS=', '
+    read -r -a _wandb_tags <<< "${WANDB_TAGS}"
+    IFS=$OLD_IFS
+    if [[ ${#_wandb_tags[@]} -gt 0 ]]; then
+      WANDB_ARGS+=(--wandb_tags)
+      for tag in "${_wandb_tags[@]}"; do
+        WANDB_ARGS+=("${tag}")
+      done
+    fi
+    unset _wandb_tags
+  fi
+  WANDB_ARGS=(--enable_wandb "${WANDB_ARGS[@]}")
+else
+  echo "[Joyce Joint Training] WandB logging disabled. Set ENABLE_WANDB=1 to enable."
+fi
+
 python train_joyce_joint.py \
   --repo_root . \
   --model_name_or_path exp/joyce_ae_160M/checkpoint-30000 \
@@ -35,10 +69,11 @@ python train_joyce_joint.py \
   --dataset HuggingFaceFW/fineweb-edu \
   --dataset_split train \
   --text_key text \
-  --seq_len 1024 \
-  --layer_L 16 \
-  --num_compressed_states 64 \
-  --train_steps 2000 \
+  --seq_len 8192 \
+  --layer_L 12 \
+  --num_compressed_states 256 \
+  --warmup_steps 1000 \
+  --train_steps 30000 \
   --batch_size 1 \
   --grad_accum 16 \
   --lr 1e-4 \
@@ -46,6 +81,7 @@ python train_joyce_joint.py \
   --save_dir checkpoints_joint \
   --compressor_ckpt exp/joyce_ae_160M/checkpoint-30000/compressor.pt \
   --upsampler_ckpt exp/joyce_ae_160M/checkpoint-30000/upsampler.pt \
-  --fp16
+  --fp16 \
+  "${WANDB_ARGS[@]}"
 
 echo "[Joyce Joint Training] Done."
