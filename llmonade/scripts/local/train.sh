@@ -68,19 +68,14 @@ config=$(grep -oP '(?<=--model.config )[^ ]+' <<< "$params")
 tokenizer=$(grep -oP '(?<=--model.tokenizer_path )[^ ]+' <<< "$params")
 model=$(
   python - <<'PY' "$config"
+import json
 import sys
+from pathlib import Path
 
-import fla  # noqa: F401
-
-try:
-    import fla.models.joyce  # ensures AutoConfig registers joyce types
-except ImportError:
-    pass
-
-from transformers import AutoConfig
-
-cfg = AutoConfig.from_pretrained(sys.argv[1], trust_remote_code=True)
-print(cfg.model_type)
+path = Path(sys.argv[1])
+with path.open() as f:
+    cfg = json.load(f)
+print(cfg.get("model_type", "unknown"))
 PY
 )
 

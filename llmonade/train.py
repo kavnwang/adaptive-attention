@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import importlib
 import json
 import os
 import random
@@ -49,6 +50,21 @@ from torchtitan.tools.profiling import (
     maybe_enable_profiling,
 )
 from typing import List, Dict
+
+
+def _ensure_auto_model_registration(model_config: AutoConfig) -> None:
+    """
+    Import the package owning the config class so that any AutoModel
+    registrations executed at module import time are applied before we
+    instantiate from the config.
+    """
+    module_name = type(model_config).__module__
+    package = module_name.rsplit(".", 1)[0] if "." in module_name else module_name
+
+    try:
+        importlib.import_module(package)
+    except Exception as exc:  # pragma: no cover - best effort (should rarely fail)
+        logger.debug(f"Unable to import '{package}' for AutoModel registration: {exc}")
 
 
 
@@ -335,6 +351,9 @@ def main(job_config: JobConfig):
     logger.info(
         f"Building model from the config\n{color.green}{model_config}{color.reset}"
     )
+
+    _ensure_auto_model_registration(model_config)
+
     with torch.device("meta"):
         model = AutoModelForCausalLM.from_config(model_config)
         if (
