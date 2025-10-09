@@ -35,4 +35,9 @@ def build_model(cfg_dict: Dict[str, Any]):
         raise ValueError(f"joyce_pretrain: seq_len={jcfg.seq_len} exceeds base max_position_embeddings={jcfg.max_position_embeddings}")
 
     model = JoyceAutoencoderForPreTraining(base_model=base_model, cfg=jcfg)
+    
+    # Ensure Joyce components have the same dtype as the base model
+    base_dtype = next(base_model.parameters()).dtype
+    model = model.to(dtype=base_dtype)
+    
     return model

@@ -24,6 +24,7 @@ from llmonade.config_manager import JobConfig
 from llmonade.data import build_dataloader, build_dataset
 from llmonade.models.parallelize_bento import parallelize_bento
 from llmonade.models.pipeline_bento import pipeline_bento
+from llmonade.models import MODEL_BUILDERS
 from llmonade.tools.utils import get_nparams_and_flops
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.ft import FTParallelDims, init_ft_manager
@@ -355,16 +356,22 @@ def main(job_config: JobConfig):
     _ensure_auto_model_registration(model_config)
 
     with torch.device("meta"):
-        model = AutoModelForCausalLM.from_config(model_config)
-        if (
-            getattr(model_config, "fuse_linear_cross_entropy", False)
-            and FusedLinearCrossEntropyLoss is not None
-        ):
-            model.criterion = FusedLinearCrossEntropyLoss(
-                num_chunks=8 // parallel_dims.tp
-            )
-        # defer weight initialization until after parallelisms are applied
-        model.apply(lambda m: setattr(m, "_is_hf_initialized", False))
+        # Check if this is a Joyce model that needs custom builder
+        if hasattr(model_config, 'model_type') and model_config.model_type == "joyce_pretrain":
+            # Use custom Joyce model builder
+            model = MODEL_BUILDERS["joyce_pretrain"](model_config.to_dict())
+        else:
+            # Use standard HuggingFace model loading
+            model = AutoModelForCausalLM.from_config(model_config)
+            if (
+                getattr(model_config, "fuse_linear_cross_entropy", False)
+                and FusedLinearCrossEntropyLoss is not None
+            ):
+                model.criterion = FusedLinearCrossEntropyLoss(
+                    num_chunks=8 // parallel_dims.tp
+                )
+            # defer weight initialization until after parallelisms are applied
+            model.apply(lambda m: setattr(m, "_is_hf_initialized", False))
     logger.info(f"{color.blue}\n{model}{color.reset}\n")
 
     # Build the collection of model converters. No-op if `model.converters` empty
@@ -412,7 +419,8 @@ def main(job_config: JobConfig):
             train_spec.parallelize_fn(m, world_mesh, parallel_dims, job_config)
             m.to_empty(device=init_device)
             with torch.no_grad():
-                m.post_init()
+                if hasattr(m, 'post_init'):
+                    m.post_init()
             m.train()
 
         # confirm that user will be able to view loss metrics on the console
@@ -422,7 +430,8 @@ def main(job_config: JobConfig):
         train_spec.parallelize_fn(model, world_mesh, parallel_dims, job_config)
         model.to_empty(device=init_device)
         with torch.no_grad():
-            model.post_init()
+            if hasattr(model, 'post_init'):
+                model.post_init()
         model.train()
 
         model_parts = [model]

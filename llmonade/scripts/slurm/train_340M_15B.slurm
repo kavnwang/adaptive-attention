@@ -51,7 +51,7 @@ srun torchrun --nnodes=$SLURM_NNODES \
   -m llmonade.train \
   --job.config_file llmonade/configs/llmon.toml \
   --job.dump_folder exp/test_logging \
-  --model.config llmonade/configs/nsa/nsa_340M.json \
+  --model.config llmonade/configs/transformer/t340M.json \
   --model.tokenizer_path fla-hub/transformer-1.3B-100B \
   --optimizer.name AdamW \
   --optimizer.eps 1e-15 \
@@ -65,9 +65,9 @@ srun torchrun --nnodes=$SLURM_NNODES \
   --training.steps 30 \
   --training.max_norm 1.0 \
   --training.skip_nan_inf \
-  --training.dataset /cache/ufw/Ultra-FineWeb \
-  --training.dataset_name default \
-  --training.dataset_split en \
+  --training.dataset HuggingFaceFW/fineweb-edu \
+  --training.dataset_name sample-10BT \
+  --training.dataset_split train \
   --training.streaming \
   --training.mixed_precision_param bfloat16 \
   --training.num_workers 32 \

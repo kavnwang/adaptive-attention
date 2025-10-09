@@ -1,4 +1,5 @@
 import os
+import json
 import threading
 from typing import Generator
 
@@ -23,6 +24,14 @@ if not HF_MODEL_DIR:
         "Set HF_MODEL_DIR to the path of your converted HF model directory "
         "(the one containing config.json)"
     )
+
+def _load_raw_config(hf_dir: str) -> dict:
+    cfg_path = os.path.join(hf_dir, "config.json")
+    try:
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
 
 
 def _resolve_dtype(device: str) -> torch.dtype:
@@ -77,6 +86,43 @@ model = AutoModelForCausalLM.from_pretrained(
 model.to(device=device, dtype=dtype)
 model.eval()
 
+# Infer maximum total tokens budget based on model config.
+# For JOYCE-integrated configs, prefer 2 * seq_len (where compression triggers),
+# but never exceed max_position_embeddings if set.
+_raw_cfg = _load_raw_config(HF_MODEL_DIR)
+_cfg_mpe = _raw_cfg.get("max_position_embeddings")
+_cfg_seq = _raw_cfg.get("seq_len")
+
+def _infer_max_total_tokens() -> int:
+    # Try via loaded HF config first (unknown keys typically survive as attributes)
+    mpe = getattr(model.config, "max_position_embeddings", None)
+    seq = getattr(model.config, "seq_len", None)
+
+    # Fallback to raw config.json values if needed
+    if mpe is None:
+        mpe = _cfg_mpe
+    if seq is None:
+        seq = _cfg_seq
+
+    max_total = None
+    if isinstance(seq, int) and seq > 0:
+        # Training recipe targets total length ~ 2 * seq_len
+        candidate = 2 * int(seq)
+        if isinstance(mpe, int) and mpe > 0:
+            max_total = min(candidate, int(mpe))
+        else:
+            max_total = candidate
+    elif isinstance(mpe, int) and mpe > 0:
+        max_total = int(mpe)
+    else:
+        # Conservative default if neither is available
+        max_total = 4096
+
+    # Always clamp to a reasonable positive integer
+    return max(1, int(max_total))
+
+MODEL_MAX_TOTAL_TOKENS = _infer_max_total_tokens()
+
 app = FastAPI(title="HF Localhost Minimal Server")
 
 
@@ -108,6 +154,19 @@ def generate_stream(prompt: str,
     """
     inputs = tokenizer(prompt, return_tensors="pt")
     inputs = {k: v.to(device) for k, v in inputs.items()}
+
+    # Enforce total tokens budget: input_len + max_new_tokens <= MODEL_MAX_TOTAL_TOKENS
+    input_len = int(inputs.get("input_ids").shape[1])
+    remaining_budget = max(0, int(MODEL_MAX_TOTAL_TOKENS) - input_len)
+    if remaining_budget <= 0:
+        # Prompt already exceeds (or equals) the max total tokens budget
+        yield _sse_format(
+            f"Prompt length {input_len} exceeds max total tokens {MODEL_MAX_TOTAL_TOKENS}"
+        )
+        yield _sse_format("[DONE]", event="done")
+        return
+    if max_new_tokens > remaining_budget:
+        max_new_tokens = remaining_budget
 
     streamer = TextIteratorStreamer(
         tokenizer=tokenizer,
@@ -147,7 +206,7 @@ def generate_stream(prompt: str,
 @app.get("/api/generate")
 def api_generate(
     prompt: str = Query(..., min_length=1),
-    max_new_tokens: int = Query(256, ge=1, le=4096),
+    max_new_tokens: int = Query(256, ge=1, le=MODEL_MAX_TOTAL_TOKENS),
     temperature: float = Query(0.8, ge=0.0, le=5.0),
     top_p: float = Query(0.95, ge=0.0, le=1.0),
 ):

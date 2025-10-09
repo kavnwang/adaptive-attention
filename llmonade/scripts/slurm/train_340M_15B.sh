@@ -3,10 +3,10 @@ set -euo pipefail
 
 # Derive repository root relative to this script and ensure we run from there.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 cd "$REPO_ROOT"
 
-# Distributed defaults (overridable):
+# Distributed defaults can be overridden via environment variables when needed.
 NNODES="${NNODES:-1}"
 GPUS_PER_NODE="${GPUS_PER_NODE:-1}"
 RDZV_ID="${RDZV_ID:-101}"
@@ -23,7 +23,11 @@ if [[ -z "$RDZV_HOST" ]]; then
     RDZV_HOST="127.0.0.1"
   fi
 fi
+
 RDZV_ENDPOINT="${RDZV_HOST}:${RDZV_PORT}"
+
+echo "Running torchrun with ${NNODES} node(s) × ${GPUS_PER_NODE} gpu(s) per node"
+echo "Rendezvous endpoint: ${RDZV_ENDPOINT}"
 
 export LOGLEVEL="${LOGLEVEL:-INFO}"
 export NCCL_DEBUG="${NCCL_DEBUG:-WARN}"
@@ -35,11 +39,11 @@ export NCCL_IB_TIMEOUT="${NCCL_IB_TIMEOUT:-23}"
 export NCCL_TIMEOUT="${NCCL_TIMEOUT:-900000}"
 export TRITON_CACHE_DIR="${TRITON_CACHE_DIR:-$HOME/tmp/triton_cache_user_owned}"
 
-mkdir -p "$TRITON_CACHE_DIR" exp/joyce_ae_340M logs
+mkdir -p "$TRITON_CACHE_DIR" logs
 chmod 777 "$TRITON_CACHE_DIR" || true
 
-LOGFILE="logs/joyce_pretrain_340M_$(date +%Y%m%d_%H%M%S).log"
-echo "Starting Joyce AE pretraining - logging to $LOGFILE"
+LOG_FILE="logs/llmonade_340M_15B_$(date +%Y%m%d_%H%M%S).log"
+echo "Logging to $LOG_FILE"
 
 PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True" \
 torchrun --nnodes="$NNODES" \
@@ -49,8 +53,8 @@ torchrun --nnodes="$NNODES" \
   --rdzv_endpoint="$RDZV_ENDPOINT" \
   -m llmonade.train \
   --job.config_file llmonade/configs/llmon.toml \
-  --job.dump_folder exp/joyce_ae_340M \
-  --model.config llmonade/configs/joyce/joyce_pretrain_ae_340m.json \
+  --job.dump_folder exp/test_logging \
+  --model.config llmonade/configs/transformer/t340M.json \
   --model.tokenizer_path fla-hub/transformer-1.3B-100B \
   --optimizer.name AdamW \
   --optimizer.eps 1e-15 \
@@ -65,9 +69,9 @@ torchrun --nnodes="$NNODES" \
   --training.max_norm 1.0 \
   --training.skip_nan_inf \
   --training.dataset HuggingFaceFW/fineweb-edu \
-  --training.streaming \
   --training.dataset_name sample-10BT \
   --training.dataset_split train \
+  --training.streaming \
   --training.mixed_precision_param bfloat16 \
   --training.num_workers 14 \
   --training.prefetch_factor 2 \
@@ -80,6 +84,4 @@ torchrun --nnodes="$NNODES" \
   --checkpoint.load_step 0 \
   --metrics.log_freq 1 \
   --comm.train_timeout_seconds 240 \
-  "$@" 2>&1 | tee "$LOGFILE"
-
-echo "Joyce AE pretraining complete!"
+  "$@" 2>&1 | tee "$LOG_FILE"

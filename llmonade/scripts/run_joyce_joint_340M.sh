@@ -1,15 +1,35 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # ==============================================================================
 # run_joyce_joint_340M.sh
 # Continued (joint) training for the 340M base + Joyce.
-# Must be run from the repo root.
 # ==============================================================================
 
-set -e
-set -o pipefail
+set -euo pipefail
+
+# Derive repository root relative to this script and ensure we run from there.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+cd "$REPO_ROOT"
 
 echo "[Joyce Joint 340M] Starting setup..."
 git submodule update --init --recursive
+
+# Environment consistency with other launchers
+export LOGLEVEL="${LOGLEVEL:-INFO}"
+export NCCL_DEBUG="${NCCL_DEBUG:-WARN}"
+export PYTHONFAULTHANDLER=1
+export NCCL_SOCKET_IFNAME="${NCCL_SOCKET_IFNAME:-eth0,en,eth,em,bond}"
+export NCCL_BUFFSIZE="${NCCL_BUFFSIZE:-2097152}"
+export NCCL_IB_DISABLE="${NCCL_IB_DISABLE:-0}"
+export NCCL_IB_TIMEOUT="${NCCL_IB_TIMEOUT:-23}"
+export NCCL_TIMEOUT="${NCCL_TIMEOUT:-900000}"
+export TRITON_CACHE_DIR="${TRITON_CACHE_DIR:-$HOME/tmp/triton_cache_user_owned}"
+
+mkdir -p "$TRITON_CACHE_DIR" logs
+chmod 777 "$TRITON_CACHE_DIR" || true
+
+LOGFILE="logs/joyce_joint_340M_$(date +%Y%m%d_%H%M%S).log"
+echo "Logging to $LOGFILE"
 
 # Choose seq_len S such that total per-sample length = 2*S.
 S=4096  # with base max_position_embeddings=8192, this keeps 2*S within range
@@ -51,7 +71,7 @@ fi
 python train_joyce_joint.py \
   --repo_root . \
   --model_name_or_path exp/transformer_340M/checkpoint-30000 \
-  --tokenizer_name_or_path EleutherAI/pythia-410m \
+  --tokenizer_name_or_path fla-hub/transformer-1.3B-100B \
   --dataset HuggingFaceFW/fineweb-edu \
   --dataset_split train \
   --text_key text \
@@ -68,6 +88,6 @@ python train_joyce_joint.py \
   --compressor_ckpt exp/joyce_ae_340M/checkpoint-30000/compressor.pt \
   --upsampler_ckpt exp/joyce_ae_340M/checkpoint-30000/upsampler.pt \
   --fp16 \
-  "${WANDB_ARGS[@]}"
+  "${WANDB_ARGS[@]}" "$@" 2>&1 | tee "$LOGFILE"
 
 echo "[Joyce Joint 340M] Done."
