@@ -46,7 +46,6 @@ dependencies = [
     "fastapi==0.115.*",
     "uvicorn[standard]==0.30.*",
     "transformers>=4.45.0",
-    "torch>=2.5.0",
     "einops>=0.7",
     "numpy>=1.24",
 ]
@@ -77,7 +76,7 @@ multi_line_output = 3
 # Use prebuilt flash-attn wheel (saves ~10 min build time)
 flash-attn = { url = "https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.3.14/flash_attn-2.6.3%2Bcu124torch2.6-cp311-cp311-linux_x86_64.whl" }
 torchtitan = { path = "3rdparty/torchtitan", editable = true }
-bento = { workspace = true, editable = true }
+bento = { workspace = true }
 
 [tool.uv.workspace]
 members = [
