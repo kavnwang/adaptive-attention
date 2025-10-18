@@ -17,8 +17,8 @@ You can skip the detailed documentation below this section and follow these quic
 git submodule update --init --recursive
 uv sync
 uv add --editable 3rdparty/bento
-uv add --editable 3rdparty/lm-evaluation-harness
-uv add --editable 3rdparty/torchtitan
+uv add --editable 3rdparty/lm-evaluation-harness --frozen
+uv add --editable 3rdparty/torchtitan --frozen
 ```
 When developing a specific module (e.g., `nsa`), make sure to switch to the appropriate branch in both this repo and the `bento`` submodule.
 
