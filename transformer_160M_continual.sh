@@ -52,8 +52,7 @@ torchrun --nproc_per_node=1 --nnodes=1 -m llmonade.train \
   --checkpoint.enable_checkpoint \
   --checkpoint.interval 6000 \
   --checkpoint.export_dtype bfloat16 \
-  --checkpoint.initial_load_path exp/transformer_160M/checkpoint/step-30000 \
-  --checkpoint.load_step -1 \
+  --checkpoint.load_step 0 \
   --metrics.log_freq 1 \
   --comm.train_timeout_seconds 240 2>&1 | tee "$LOGFILE"
 
