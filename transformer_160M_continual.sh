@@ -1,5 +1,5 @@
 #!/bin/bash
-# run_160M.sh
+# transformer_160M_continual.sh
 
 set -e  # Exit on error
 
@@ -7,7 +7,7 @@ set -e  # Exit on error
 #cd /workspace/adaptive-attention
 
 # Create necessary directories
-mkdir -p exp/transformer_160M
+mkdir -p exp/transformer_continual_160M
 mkdir -p logs
 
 # Set environment variables
@@ -16,14 +16,14 @@ export TRITON_CACHE_DIR=~/tmp/triton_cache_user_owned
 mkdir -p $TRITON_CACHE_DIR
 
 # Log file with timestamp
-LOGFILE="logs/train_transformer_160M_$(date +%Y%m%d_%H%M%S).log"
+LOGFILE="logs/train_transformer_continual_160M_$(date +%Y%m%d_%H%M%S).log"
 
 echo "Starting training - logging to $LOGFILE"
 
 # Run training with torchrun (sets LOCAL_RANK and other distributed vars)
 torchrun --nproc_per_node=1 --nnodes=1 -m llmonade.train \
   --job.config_file llmonade/configs/llmon.toml \
-  --job.dump_folder exp/transformer_160M \
+  --job.dump_folder exp/transformer_continual_160M \
   --model.config llmonade/configs/transformer/pythia_160m.json \
   --model.tokenizer_path EleutherAI/pythia-160m \
   --optimizer.name AdamW \
@@ -33,10 +33,10 @@ torchrun --nproc_per_node=1 --nnodes=1 -m llmonade.train \
   --lr_scheduler.warmup_steps 1000 \
   --lr_scheduler.lr_min 0.1 \
   --lr_scheduler.decay_type cosine \
-  --training.batch_size 2 \
-  --training.seq_len 8192 \
+  --training.batch_size 4 \
+  --training.seq_len 16384 \
   --training.gradient_accumulation_steps 1 \
-  --training.steps 30000 \
+  --training.steps 20000 \
   --training.max_norm 1.0 \
   --training.skip_nan_inf \
   --training.dataset HuggingFaceFW/fineweb-edu \
@@ -52,9 +52,9 @@ torchrun --nproc_per_node=1 --nnodes=1 -m llmonade.train \
   --checkpoint.enable_checkpoint \
   --checkpoint.interval 6000 \
   --checkpoint.export_dtype bfloat16 \
-  --checkpoint.load_step 0 \
+  --checkpoint.initial_load_path exp/transformer_160M/checkpoint/step-30000 \
+  --checkpoint.load_step -1 \
   --metrics.log_freq 1 \
   --comm.train_timeout_seconds 240 2>&1 | tee "$LOGFILE"
 
 echo "Training complete!"
-

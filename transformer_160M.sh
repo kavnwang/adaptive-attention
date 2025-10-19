@@ -1,5 +1,5 @@
 #!/bin/bash
-# autoencoder_160M.sh
+# transformer_160M.sh
 
 set -e  # Exit on error
 
@@ -7,7 +7,7 @@ set -e  # Exit on error
 #cd /workspace/adaptive-attention
 
 # Create necessary directories
-mkdir -p exp/test_160M
+mkdir -p exp/transformer_160M
 mkdir -p logs
 
 # Set environment variables
@@ -16,20 +16,16 @@ export TRITON_CACHE_DIR=~/tmp/triton_cache_user_owned
 mkdir -p $TRITON_CACHE_DIR
 
 # Log file with timestamp
-LOGFILE="logs/train_autoencoder_160M_$(date +%Y%m%d_%H%M%S).log"
+LOGFILE="logs/train_transformer_160M_$(date +%Y%m%d_%H%M%S).log"
 
 echo "Starting training - logging to $LOGFILE"
 
 # Run training with torchrun (sets LOCAL_RANK and other distributed vars)
 torchrun --nproc_per_node=1 --nnodes=1 -m llmonade.train \
   --job.config_file llmonade/configs/llmon.toml \
-  --job.dump_folder exp/autoencoder_test \
-  --model.config llmonade/configs/autoencoder/autoencoder_160m.json \
+  --job.dump_folder exp/transformer_160M \
+  --model.config llmonade/configs/transformer/pythia_160m.json \
   --model.tokenizer_path EleutherAI/pythia-160m \
-  --checkpoint.pretrained_layer_path exp/transformer_160M \
-  --checkpoint.pretrained_layer_step 30000 \
-  --checkpoint.pretrained_layer_map llmonade/configs/mappings/transformer_160m_to_autoencoder_6layers.json \
-  --checkpoint.freeze_layer_map llmonade/configs/mappings/autoencoder_freeze_base_6layers_no_head.json \
   --optimizer.name AdamW \
   --optimizer.eps 1e-15 \
   --optimizer.lr 3e-4 \
@@ -38,7 +34,7 @@ torchrun --nproc_per_node=1 --nnodes=1 -m llmonade.train \
   --lr_scheduler.lr_min 0.1 \
   --lr_scheduler.decay_type cosine \
   --training.batch_size 2 \
-  --training.seq_len 16384 \
+  --training.seq_len 8192 \
   --training.gradient_accumulation_steps 1 \
   --training.steps 30000 \
   --training.max_norm 1.0 \
@@ -61,3 +57,4 @@ torchrun --nproc_per_node=1 --nnodes=1 -m llmonade.train \
   --comm.train_timeout_seconds 240 2>&1 | tee "$LOGFILE"
 
 echo "Training complete!"
+

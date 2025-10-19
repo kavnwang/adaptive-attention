@@ -18,6 +18,152 @@ from torch.distributed.checkpoint.format_utils import dcp_to_torch_save
 from torch.distributed.checkpoint.stateful import Stateful
 
 from torchtitan.tools.logging import logger
+import re as _re
+
+def _parse_freeze_mapping(mapping_str: Optional[str]) -> Optional[Dict[str, Any]]:
+    """Parse JSON string or load from file for freeze mapping.
+
+    Accepts the same schema variants as PretrainedLayerLoader:
+    - Inline JSON string
+    - Path to a JSON file
+    - Either flat dict of patterns or dict with layer_mappings/component_mappings
+    """
+    if mapping_str is None:
+        return None
+    try:
+        if mapping_str.startswith("{"):
+            return json.loads(mapping_str)
+        with open(mapping_str, "r") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, FileNotFoundError) as e:
+        raise ValueError(f"Failed to parse freeze layer mapping: {e}")
+
+
+def _expand_range_list(range_str: str) -> list[int]:
+    """Expand "0-11" to [0..11] or convert single index to [i]."""
+    if "-" in range_str:
+        start, end = map(int, range_str.split("-"))
+        return list(range(start, end + 1))
+    return [int(range_str)]
+
+
+def _wildcard_to_regex(pattern: str) -> str:
+    """Convert a wildcard pattern like 'model.embeddings.*' to a regex string."""
+    # Escape dots, then replace \* with .*
+    # Anchor pattern to match full parameter name
+    esc = _re.escape(pattern)
+    # _re.escape turns * into \*, so replace that with .*
+    esc = esc.replace("\\*", ".*")
+    return f"^{esc}$"
+
+
+def freeze_model_layers(
+    model_parts: list, freeze_layer_map: str, strict: bool = False
+) -> int:
+    """
+    Freeze parameters (requires_grad=False) that match target layer/component patterns.
+
+    Args:
+        model_parts: list of nn.Module (e.g., [model] or pipeline parts)
+        freeze_layer_map: JSON string or file path with mapping schema:
+            {
+              "layer_mappings": {"0-11": "0-11"},
+              "component_mappings": {"model.embeddings.*": "model.embeddings.*", ...}
+            }
+            or a flat dict with wildcard patterns.
+        strict: if True, raise if nothing is frozen.
+
+    Returns:
+        int: number of parameters frozen.
+    """
+    if not isinstance(model_parts, (list, tuple)):
+        model_parts = [model_parts]
+
+    mapping = _parse_freeze_mapping(freeze_layer_map)
+    if not mapping:
+        logger.warning("freeze_model_layers: empty mapping provided; nothing to freeze")
+        if strict:
+            raise RuntimeError("freeze_model_layers: no mapping provided")
+        return 0
+
+    # Build regex patterns that match TARGET parameter names in the model
+    patterns: list[str] = []
+
+    # Support nested format with explicit keys
+    layer_mappings = mapping.get("layer_mappings") if isinstance(mapping, dict) else None
+    component_mappings = mapping.get("component_mappings") if isinstance(mapping, dict) else None
+
+    if layer_mappings:
+        # We only need target layers (values). Expand ranges, then build regex for each layer
+        target_layers: set[int] = set()
+        for _src, tgt in layer_mappings.items():
+            for idx in _expand_range_list(tgt):
+                target_layers.add(idx)
+        for idx in sorted(target_layers):
+            patterns.append(fr"^model\.layers\.{idx}\..*")
+
+    if component_mappings:
+        # Component mappings can be direct or wildcard; freeze target side (values)
+        for src_pat, tgt_pat in component_mappings.items():
+            if isinstance(tgt_pat, str):
+                patterns.append(_wildcard_to_regex(tgt_pat))
+            # Be resilient: if tgt is missing but src exists, use src
+            elif isinstance(src_pat, str):
+                patterns.append(_wildcard_to_regex(src_pat))
+
+    # If neither nested keys detected, interpret as flat mapping; collect both keys/values
+    if not layer_mappings and not component_mappings and isinstance(mapping, dict):
+        for k, v in mapping.items():
+            if isinstance(k, str):
+                patterns.append(_wildcard_to_regex(k))
+            if isinstance(v, str):
+                patterns.append(_wildcard_to_regex(v))
+
+    # Deduplicate compiled regex patterns
+    compiled = []
+    seen = set()
+    for p in patterns:
+        if p not in seen:
+            try:
+                compiled.append(_re.compile(p))
+                seen.add(p)
+            except Exception as e:
+                logger.warning(f"Invalid freeze regex pattern '{p}': {e}")
+
+    if not compiled:
+        logger.warning("freeze_model_layers: no valid patterns compiled; nothing to freeze")
+        if strict:
+            raise RuntimeError("freeze_model_layers: no valid patterns")
+        return 0
+
+    # Walk parameters and freeze any matches
+    frozen_params = 0
+    sample_matches: list[str] = []
+    for part in model_parts:
+        for name, param in part.named_parameters():
+            try:
+                if any(rgx.match(name) for rgx in compiled):
+                    if param.requires_grad:
+                        param.requires_grad = False
+                        frozen_params += 1
+                        if len(sample_matches) < 10:
+                            sample_matches.append(name)
+            except Exception:
+                # Be robust against odd param names
+                continue
+
+    if frozen_params > 0:
+        logger.info(
+            f"Successfully froze {frozen_params} parameters; examples: "
+            + ", ".join(sample_matches)
+        )
+    else:
+        msg = "freeze_model_layers: no parameters matched the provided patterns"
+        if strict:
+            raise RuntimeError(msg)
+        logger.warning(msg)
+
+    return frozen_params
 
 
 @dataclass

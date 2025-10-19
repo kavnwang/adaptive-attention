@@ -19,7 +19,7 @@ from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 from fla.modules.fused_linear_cross_entropy import FusedLinearCrossEntropyLoss
 from fla.ops.utils import prepare_position_ids
-from llmonade.components.checkpoint import TrainState, PretrainedLayerLoader
+from llmonade.components.checkpoint import TrainState, PretrainedLayerLoader, freeze_model_layers
 from llmonade.config_manager import JobConfig
 from llmonade.data import build_dataloader, build_dataset
 from llmonade.models.parallelize_bento import parallelize_bento
@@ -429,7 +429,7 @@ def main(job_config: JobConfig):
 
         model_parts = [model]
 
-    # Initialize layers from pretrained checkpoint if configured
+    # Initialize layers from one or more pretrained checkpoints if configured
     if job_config.checkpoint.pretrained_layer_path:
         if not job_config.checkpoint.pretrained_layer_map:
             raise ValueError(
@@ -437,40 +437,78 @@ def main(job_config: JobConfig):
                 "checkpoint.pretrained_layer_path"
             )
 
-        try:
-            logger.info(
-                f"{color.green}Initializing layers from {job_config.checkpoint.pretrained_layer_path}{color.reset}"
+        # Support comma-separated lists to allow multiple sources and mappings
+        def _split_csv(val: str) -> list[str]:
+            return [s.strip() for s in val.split(",") if s.strip()]
+
+        src_paths = (
+            _split_csv(job_config.checkpoint.pretrained_layer_path)
+            if isinstance(job_config.checkpoint.pretrained_layer_path, str)
+            else [job_config.checkpoint.pretrained_layer_path]
+        )
+        maps_raw = job_config.checkpoint.pretrained_layer_map
+        map_specs = _split_csv(maps_raw) if isinstance(maps_raw, str) else [maps_raw]
+
+        # Align mapping list length with paths (repeat single map if needed)
+        if len(map_specs) == 1 and len(src_paths) > 1:
+            map_specs = map_specs * len(src_paths)
+        if len(map_specs) != len(src_paths):
+            raise ValueError(
+                "Number of mapping specs must equal number of pretrained_layer_path entries"
             )
 
-            loader = PretrainedLayerLoader(
-                source_path=job_config.checkpoint.pretrained_layer_path,
-                layer_mapping=job_config.checkpoint.pretrained_layer_map,
-                step=job_config.checkpoint.pretrained_layer_step,
-                device_mesh=world_mesh,
-                parallel_dims=parallel_dims,
-            )
+        # Step may be a single int; when multiple paths are provided, use the same step for all
+        step_spec = job_config.checkpoint.pretrained_layer_step
+        step_vals = []
+        if isinstance(step_spec, int):
+            step_vals = [step_spec] * len(src_paths)
+        else:
+            # Fallback: try to parse string; if parsing fails, use -1 (latest)
+            try:
+                step_vals = [int(s) for s in _split_csv(str(step_spec))]
+            except Exception:
+                step_vals = [-1] * len(src_paths)
+            if len(step_vals) == 1 and len(src_paths) > 1:
+                step_vals = step_vals * len(src_paths)
+            if len(step_vals) != len(src_paths):
+                step_vals = [-1] * len(src_paths)
 
-            # Apply to all model parts (for pipeline parallelism compatibility)
-            total_transferred = 0
-            for i, model_part in enumerate(model_parts):
-                if parallel_dims.pp_enabled:
-                    logger.info(f"Applying pretrained layers to pipeline stage {i}")
-                transferred_keys = loader.load_and_apply(model_part)
-                total_transferred += len(transferred_keys)
-
-            logger.info(
-                f"{color.green}Successfully initialized {total_transferred} parameters "
-                f"from pretrained checkpoint{color.reset}"
-            )
-
-        except Exception as e:
-            if job_config.checkpoint.pretrained_layer_strict:
-                raise RuntimeError(f"Failed to initialize pretrained layers: {e}")
-            else:
-                logger.warning(
-                    f"{color.yellow}Failed to initialize pretrained layers: {e}. "
-                    f"Continuing with random initialization.{color.reset}"
+        total_transferred = 0
+        for src_path, map_spec, step in zip(src_paths, map_specs, step_vals):
+            try:
+                logger.info(
+                    f"{color.green}Initializing layers from {src_path} (step={step}){color.reset}"
                 )
+                loader = PretrainedLayerLoader(
+                    source_path=src_path,
+                    layer_mapping=map_spec,
+                    step=step,
+                    device_mesh=world_mesh,
+                    parallel_dims=parallel_dims,
+                )
+                # Apply to all model parts (for pipeline parallelism compatibility)
+                for i, model_part in enumerate(model_parts):
+                    if parallel_dims.pp_enabled:
+                        logger.info(
+                            f"Applying pretrained layers to pipeline stage {i}"
+                        )
+                    transferred_keys = loader.load_and_apply(model_part)
+                    total_transferred += len(transferred_keys)
+            except Exception as e:
+                if job_config.checkpoint.pretrained_layer_strict:
+                    raise RuntimeError(
+                        f"Failed to initialize pretrained layers from {src_path}: {e}"
+                    )
+                else:
+                    logger.warning(
+                        f"{color.yellow}Failed to initialize pretrained layers from {src_path}: {e}. "
+                        f"Continuing without this source.{color.reset}"
+                    )
+
+        if total_transferred > 0:
+            logger.info(
+                f"{color.green}Successfully initialized {total_transferred} parameters from pretrained checkpoints{color.reset}"
+            )
 
     # Freeze layers if configured
     if job_config.checkpoint.freeze_layer_map:
