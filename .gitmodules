@@ -1,3 +1,7 @@
+[submodule "3rdparty/bento"]
+	path = 3rdparty/bento
+	url = https://github.com/kavnwang/bento
+	branch = main
 [submodule "3rdparty/toast"]
 	path = 3rdparty/toast
 	url = https://github.com/tilde-research/toast.git
