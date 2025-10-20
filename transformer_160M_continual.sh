@@ -24,7 +24,7 @@ echo "Starting training - logging to $LOGFILE"
 torchrun --nproc_per_node=1 --nnodes=1 -m llmonade.train \
   --job.config_file llmonade/configs/llmon.toml \
   --job.dump_folder exp/transformer_continual_160M \
-  --model.config llmonade/configs/transformer/pythia_160m.json \
+  --model.config llmonade/configs/transformer/pythia_160m_continual.json \
   --model.tokenizer_path EleutherAI/pythia-160m \
   --optimizer.name AdamW \
   --optimizer.eps 1e-15 \

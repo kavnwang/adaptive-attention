@@ -33,10 +33,10 @@ torchrun --nproc_per_node=1 --nnodes=1 -m llmonade.train \
   --lr_scheduler.warmup_steps 1000 \
   --lr_scheduler.lr_min 0.1 \
   --lr_scheduler.decay_type cosine \
-  --training.batch_size 2 \
-  --training.seq_len 8192 \
+  --training.batch_size 4 \
+  --training.seq_len 16384 \
   --training.gradient_accumulation_steps 1 \
-  --training.steps 30000 \
+  --training.steps 20000 \
   --training.max_norm 1.0 \
   --training.skip_nan_inf \
   --training.dataset HuggingFaceFW/fineweb-edu \

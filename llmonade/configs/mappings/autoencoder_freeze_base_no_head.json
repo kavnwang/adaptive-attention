@@ -1,0 +1,10 @@
+{
+  "layer_mappings": {
+    "0-11": "0-11"
+  },
+  "component_mappings": {
+    "model.embeddings.*": "model.embeddings.*",
+    "model.norm.*": "model.norm.*"
+  }
+}
+

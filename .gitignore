@@ -97,7 +97,7 @@ synthetic_*_data_*/
 synthetic_dyck/
 synthetic_shuffle_dyck/
 
-*.json
+#*.json
 *.npy
 *.zip
 # TODO(security): Keep local secrets out of Git

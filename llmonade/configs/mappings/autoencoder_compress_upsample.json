@@ -1,0 +1,6 @@
+{
+  "component_mappings": {
+    "model.compress.*": "model.compress.*",
+    "model.upsample.*": "model.upsample.*"
+  }
+}
