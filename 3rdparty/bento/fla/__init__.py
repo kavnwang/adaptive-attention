@@ -6,6 +6,8 @@ from fla.layers import (
     BasedLinearAttention,
     BitAttention,
     Comba,
+    Compress,
+    Upsample,
     DeltaFormerAttention,
     DeltaNet,
     GatedDeltaNet,
@@ -31,6 +33,8 @@ from fla.layers import (
 from fla.models import (
     ABCForCausalLM,
     ABCModel,
+    AutoencoderForCausalLM,
+    AutoencoderModel,
     BitNetForCausalLM,
     BitNetModel,
     CombaForCausalLM,
@@ -76,14 +80,21 @@ from fla.models import (
     RWKV7ForCausalLM,
     RWKV7Model,
     TransformerForCausalLM,
-    TransformerModel
+    TransformerModel,
+    TransformerContinualForCausalLM,
+    TransformerContinualModel,
+    AutoencoderContinualForCausalLM,
+    AutoencoderContinualModel,
 )
 
 __all__ = [
     'ABCAttention', 'ABCForCausalLM', 'ABCModel',
-    'Attention', 'TransformerForCausalLM', 'TransformerModel',
+    'Attention', 'TransformerForCausalLM', 'TransformerModel', 'TransformerContinualForCausalLM', 'TransformerContinualModel',
     'BasedLinearAttention',
     'BitAttention', 'BitNetForCausalLM', 'BitNetModel',
+    'AutoencoderForCausalLM', 'AutoencoderModel',
+    'AutoencoderContinualForCausalLM', 'AutoencoderContinualModel',
+    'Compress', 'Upsample',
     'Comba', 'CombaForCausalLM', 'CombaModel',
     'DeltaNet', 'DeltaNetForCausalLM', 'DeltaNetModel',
     'DeltaFormerAttention', 'DeltaFormerForCausalLM', 'DeltaFormerModel',

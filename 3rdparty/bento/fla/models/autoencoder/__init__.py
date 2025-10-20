@@ -3,7 +3,7 @@
 from transformers import AutoConfig, AutoModel, AutoModelForCausalLM
 
 from fla.models.autoencoder.configuration_autoencoder import AutoencoderConfig
-from fla.models.autoencoder.modeling_autoencoder import AutoencoderForCausalLM, AutoencoderModel
+from fla.models.autoencoder.modeling_autoencoder_real import AutoencoderForCausalLM, AutoencoderModel
 
 AutoConfig.register(AutoencoderConfig.model_type, AutoencoderConfig, exist_ok=True)
 AutoModel.register(AutoencoderConfig, AutoencoderModel, exist_ok=True)

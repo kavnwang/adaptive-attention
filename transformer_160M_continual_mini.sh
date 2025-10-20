@@ -1,5 +1,5 @@
 #!/bin/bash
-# transformer_160M_continual.sh
+# transformer_160M_continual_mini.sh
 
 set -e  # Exit on error
 
@@ -7,26 +7,24 @@ set -e  # Exit on error
 #cd /workspace/adaptive-attention
 
 # Create necessary directories
-mkdir -p exp/transformer_continual_160M
+mkdir -p exp/transformer_continual_160M_mini
 mkdir -p logs
 
 # Set environment variables
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 export TRITON_CACHE_DIR=~/tmp/triton_cache_user_owned
 mkdir -p $TRITON_CACHE_DIR
-# Make vendored bento importable without network installs
-export PYTHONPATH="$(pwd)/3rdparty/bento:${PYTHONPATH}"
 
 # Log file with timestamp
-LOGFILE="logs/train_transformer_continual_160M_$(date +%Y%m%d_%H%M%S).log"
+LOGFILE="logs/train_transformer_continual_160M_mini_$(date +%Y%m%d_%H%M%S).log"
 
 echo "Starting training - logging to $LOGFILE"
 
 # Run training with torchrun (sets LOCAL_RANK and other distributed vars)
 torchrun --nproc_per_node=1 --nnodes=1 -m llmonade.train \
   --job.config_file llmonade/configs/llmon.toml \
-  --job.dump_folder exp/transformer_continual_160M \
-  --model.config llmonade/configs/transformer/pythia_160m_continual.json \
+  --job.dump_folder exp/transformer_continual_160M_mini \
+  --model.config llmonade/configs/transformer/pythia_160m_continual_mini.json \
   --model.tokenizer_path EleutherAI/pythia-160m \
   --optimizer.name AdamW \
   --optimizer.eps 1e-15 \
@@ -35,8 +33,8 @@ torchrun --nproc_per_node=1 --nnodes=1 -m llmonade.train \
   --lr_scheduler.warmup_steps 1000 \
   --lr_scheduler.lr_min 0.1 \
   --lr_scheduler.decay_type cosine \
-  --training.batch_size 4 \
-  --training.seq_len 16384 \
+  --training.batch_size 16 \
+  --training.seq_len 4608 \
   --training.gradient_accumulation_steps 1 \
   --training.steps 20000 \
   --training.max_norm 1.0 \

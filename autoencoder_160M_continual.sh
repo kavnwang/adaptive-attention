@@ -11,6 +11,8 @@ mkdir -p logs
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 export TRITON_CACHE_DIR=~/tmp/triton_cache_user_owned
 mkdir -p $TRITON_CACHE_DIR
+# Make vendored bento importable without network installs
+export PYTHONPATH="$(pwd)/3rdparty/bento:${PYTHONPATH}"
 
 # Log file with timestamp
 LOGFILE="logs/train_autoencoder_160M_continual_$(date +%Y%m%d_%H%M%S).log"
@@ -25,7 +27,7 @@ echo "Starting AE continual training - logging to $LOGFILE"
 torchrun --nproc_per_node=1 --nnodes=1 -m llmonade.train \
   --job.config_file llmonade/configs/llmon.toml \
   --job.dump_folder exp/autoencoder_continual_160M \
-  --model.config llmonade/configs/autoencoder/autoencoder_160m_12l_continual.json \
+  --model.config llmonade/configs/autoencoder/autoencoder_160m_continual.json \
   --model.tokenizer_path EleutherAI/pythia-160m \
   --optimizer.name AdamW \
   --optimizer.eps 1e-15 \

@@ -6,16 +6,15 @@ from typing import Optional
 from transformers.configuration_utils import PretrainedConfig
 
 
-class AutoencoderConfig(PretrainedConfig):
+class TransformerContinualConfig(PretrainedConfig):
 
-    model_type = 'autoencoder'
+    model_type = 'transformer_continual'
     keys_to_ignore_at_inference = ['past_key_values']
 
     def __init__(
         self,
         hidden_size: int = 2048,
         num_hidden_layers: int = 24,
-        num_hidden_layers_post: int = 0,
         num_heads: int = 32,
         num_kv_heads: Optional[int] = None,
         qkv_bias: bool = False,
@@ -39,21 +38,14 @@ class AutoencoderConfig(PretrainedConfig):
         fuse_cross_entropy: bool = True,
         fuse_linear_cross_entropy: bool = False,
         use_l2warp: bool = False,
-        vocab_size: int = 32000,
-        seq_len: int = 8192,
-        compression_ratio: float = 0.0625,
-        compression_depth: int = 2,
-        upsample_depth: int = 1,
-        compression_layer_idx: Optional[int] = 6,
-        masked_tokens: int = 0,
-        compression_tokens: int = 0,
+        compression_layer_idx: int = 6,
         masked_prefix: int = 8192,
         compression_prefix: int = 512,
+        vocab_size: int = 32000,
         **kwargs,
     ):
         self.hidden_size = hidden_size
         self.num_hidden_layers = num_hidden_layers
-        self.num_hidden_layers_post = num_hidden_layers_post
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
         self.qkv_bias = qkv_bias
@@ -77,14 +69,10 @@ class AutoencoderConfig(PretrainedConfig):
         self.fuse_linear_cross_entropy = fuse_linear_cross_entropy
         self.use_l2warp = use_l2warp
         self.vocab_size = vocab_size
-        self.seq_len = seq_len
-        self.compression_ratio = compression_ratio
-        self.compression_depth = compression_depth
-        self.upsample_depth = upsample_depth
         self.compression_layer_idx = compression_layer_idx
-        self.masked_tokens = masked_tokens
-        self.compression_tokens = compression_tokens
-        # loss_keep_tokens removed; loss region derived from masked/compression tokens
+        self.masked_prefix = masked_prefix
+        self.compression_prefix = compression_prefix
+
         if fuse_cross_entropy and fuse_linear_cross_entropy:
             raise ValueError(
                 "`fuse_cross_entropy` and `fuse_linear_cross_entropy` cannot be True at the same time."

@@ -14,7 +14,7 @@ from transformers.utils import logging
 from transformers.utils.deprecation import deprecate_kwarg
 
 from fla.layers.attn import Attention
-from fla.models.transformer.configuration_transformer import TransformerConfig
+from fla.models.transformer_continual.configuration_transformer_continual import TransformerContinualConfig
 from fla.models.utils import Cache, FLAGenerationMixin
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
 from fla.modules import GatedMLP as TransformerMLP
@@ -35,14 +35,14 @@ logger = logging.get_logger(__name__)
 
 class TransformerBlock(GradientCheckpointingLayer):
 
-    def __init__(self, config: TransformerConfig, layer_idx: int):
+    def __init__(self, config: TransformerContinualConfig, layer_idx: int):
         super().__init__()
 
         self.config = config
         self.layer_idx = layer_idx
-        self.compression_layer_idx = getattr(config, 'compression_layer_idx', 0)
-        self.masked_prefix = int(getattr(config, 'masked_prefix', 0) or 0)
-        self.compression_prefix = int(getattr(config, 'compression_prefix', 0) or 0)
+        self.compression_layer_idx = self.config.compression_layer_idx
+        self.masked_prefix = self.config.masked_prefix
+        self.compression_prefix = self.config.compression_prefix
 
         self.attn_norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)
         self.attn = Attention(
@@ -78,8 +78,6 @@ class TransformerBlock(GradientCheckpointingLayer):
 
         residual = hidden_states
         hidden_states = self.attn_norm(hidden_states)
-        # Apply early-layer masking only to the compression_prefix chunk remaining after truncation.
-        # We assume the first (masked_prefix - compression_prefix) tokens have been truncated upstream.
         if self.layer_idx < self.compression_layer_idx and self.compression_prefix > 0:
             seq_len = hidden_states.size(1)
             comp_mask = min(self.compression_prefix, seq_len)
@@ -117,9 +115,9 @@ class TransformerBlock(GradientCheckpointingLayer):
         return outputs
 
 
-class TransformerPreTrainedModel(PreTrainedModel):
+class TransformerContinualPreTrainedModel(PreTrainedModel):
 
-    config_class = TransformerConfig
+    config_class = TransformerContinualConfig
     base_model_prefix = 'model'
     supports_gradient_checkpointing = True
     _no_split_modules = ['TransformerBlock']
@@ -135,8 +133,6 @@ class TransformerPreTrainedModel(PreTrainedModel):
         num_residuals_per_layer: int = 2,
     ):
         if isinstance(module, (nn.Linear, nn.Conv1d)):
-            # Slightly different from the TF version which uses truncated_normal for initialization
-            # cf https://github.com/pytorch/pytorch/pull/5617
             nn.init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
             if module.bias is not None:
                 nn.init.zeros_(module.bias)
@@ -146,33 +142,23 @@ class TransformerPreTrainedModel(PreTrainedModel):
             module.reset_parameters()
 
         if rescale_prenorm_residual:
-            # Reinitialize selected weights subject to the OpenAI GPT-2 Paper Scheme:
-            #   > A modified initialization which accounts for the accumulation on the residual path with model depth. Scale
-            #   > the weights of residual layers at initialization by a factor of 1/√N where N is the # of residual layers.
-            #   >   -- GPT-2 :: https://openai.com/blog/better-language-models/
-            #
-            # Reference (Megatron-LM): https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/model/gpt_model.py
             p = None
             if hasattr(module, 'o_proj'):
                 p = module.o_proj.weight
             elif hasattr(module, 'down_proj'):
                 p = module.down_proj.weight
             if p is not None:
-                # Special Scaled Initialization --> There are 2 Layer Norms per Transformer Block
-                # Following Pytorch init, except scale by 1/sqrt(2 * n_layer)
-                # We need to reinit p since this code could be called multiple times
-                # Having just p *= scale would repeatedly scale it down
                 nn.init.kaiming_uniform_(p, a=math.sqrt(5))
                 with torch.no_grad():
                     p /= math.sqrt(num_residuals_per_layer * self.config.num_hidden_layers)
 
 
-class TransformerModel(TransformerPreTrainedModel):
+class TransformerContinualModel(TransformerContinualPreTrainedModel):
 
     def __init__(
         self,
-        config: TransformerConfig
-    ) -> TransformerModel:
+        config: TransformerContinualConfig
+    ) -> 'TransformerContinualModel':
         super().__init__(config)
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
@@ -213,7 +199,6 @@ class TransformerModel(TransformerPreTrainedModel):
         use_cache = use_cache if use_cache is not None else (self.config.use_cache if not self.training else False)
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-        # retrieve input_ids and inputs_embeds
         if input_ids is not None and inputs_embeds is not None:
             raise ValueError("You cannot specify both input_ids and inputs_embeds at the same time")
         elif input_ids is None and inputs_embeds is None:
@@ -222,8 +207,9 @@ class TransformerModel(TransformerPreTrainedModel):
         if use_cache and not isinstance(past_key_values, Cache):
             past_key_values = Cache.from_legacy_cache(past_key_values)
 
-        # Truncate the first (masked_prefix - compression_prefix) tokens globally at model input
-        drop_len = max(0, int(getattr(self.config, 'masked_prefix', 0) or 0) - int(getattr(self.config, 'compression_prefix', 0) or 0))
+        masked_prefix = int(getattr(self.config, 'masked_prefix', 0) or 0)
+        compression_prefix = int(getattr(self.config, 'compression_prefix', 0) or 0)
+        drop_len = max(0, masked_prefix - compression_prefix)
         if drop_len > 0:
             if input_ids is not None:
                 input_ids = input_ids[:, drop_len:]
@@ -235,7 +221,6 @@ class TransformerModel(TransformerPreTrainedModel):
         if inputs_embeds is None:
             inputs_embeds = self.embeddings(input_ids)
 
-        # embed positions
         hidden_states = inputs_embeds
 
         all_hidden_states = () if output_hidden_states else None
@@ -265,7 +250,6 @@ class TransformerModel(TransformerPreTrainedModel):
 
         hidden_states = self.norm(hidden_states)
 
-        # add hidden states from the last decoder layer
         if output_hidden_states:
             all_hidden_states += (hidden_states,)
 
@@ -280,18 +264,19 @@ class TransformerModel(TransformerPreTrainedModel):
         )
 
 
-class TransformerForCausalLM(TransformerPreTrainedModel, FLAGenerationMixin):
+class TransformerContinualForCausalLM(TransformerContinualPreTrainedModel, FLAGenerationMixin):
 
     _tied_weights_keys = ["lm_head.weight"]
 
     def __init__(self, config):
         super().__init__(config)
-        self.model = TransformerModel(config)
+        self.model = TransformerContinualModel(config)
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+        self.masked_prefix = config.masked_prefix
+        self.compression_prefix = config.compression_prefix
         self.criterion = None
 
-        # Initialize weights and apply final processing
         self.post_init()
 
     def get_input_embeddings(self):
@@ -324,7 +309,6 @@ class TransformerForCausalLM(TransformerPreTrainedModel, FLAGenerationMixin):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
-        logits_to_keep: Optional[int] = 0,
         **kwargs: Unpack[Any]
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
@@ -347,39 +331,47 @@ class TransformerForCausalLM(TransformerPreTrainedModel, FLAGenerationMixin):
 
         hidden_states = outputs[0]
 
-        logits = None if self.config.fuse_linear_cross_entropy else self.lm_head(hidden_states[:, -logits_to_keep:])
+        seq_out = hidden_states.size(1)
+        masked_prefix = self.masked_prefix
+        compression_prefix = self.compression_prefix
+        keep_len = max(0, seq_out - min(masked_prefix, compression_prefix))
 
+        logits = None
         loss = None
         if labels is not None:
             if getattr(self, 'criterion', None) is None:
-                if self.config.fuse_linear_cross_entropy:
-                    criterion = FusedLinearCrossEntropyLoss(use_l2warp=self.config.use_l2warp)
-                elif self.config.fuse_cross_entropy:
+                if getattr(self.config, 'fuse_linear_cross_entropy', False):
+                    criterion = FusedLinearCrossEntropyLoss(use_l2warp=getattr(self.config, 'use_l2warp', False))
+                elif getattr(self.config, 'fuse_cross_entropy', False):
                     criterion = FusedCrossEntropyLoss(inplace_backward=True)
                 else:
                     criterion = nn.CrossEntropyLoss()
             else:
                 criterion = self.criterion
-            # Enable model parallelism
             labels = labels.to(hidden_states.device)
-            # Truncate labels the same way inputs were truncated
-            masked_prefix = int(getattr(self.config, 'masked_prefix', 0) or 0)
-            compression_prefix = int(getattr(self.config, 'compression_prefix', 0) or 0)
             drop_len = max(0, masked_prefix - compression_prefix)
             if drop_len > 0:
                 labels = labels[:, drop_len:]
-            # Shift labels left by 1
             labels = torch.cat((labels[..., 1:], torch.full_like(labels[:, :1], criterion.ignore_index)), 1)
-            # Ignore the compression_prefix tokens from loss (the initial chunk of the truncated sequence)
-            if compression_prefix > 1:
-                ignore_count = min(compression_prefix - 1, labels.size(1))
-                if ignore_count > 0:
-                    labels[:, :ignore_count] = criterion.ignore_index
-            if self.config.fuse_linear_cross_entropy:
-                loss = criterion(hidden_states, labels, self.lm_head.weight, self.lm_head.bias)
+
+            if keep_len > 0:
+                hs_tail = hidden_states[:, -keep_len:, :]
+                labels_tail = labels[:, -keep_len:]
+                if getattr(self.config, 'fuse_linear_cross_entropy', False):
+                    loss = criterion(hs_tail, labels_tail, self.lm_head.weight, self.lm_head.bias)
+                else:
+                    logits = self.lm_head(hs_tail)
+                    loss = criterion(
+                        logits.contiguous().view(-1, logits.size(-1)),
+                        labels_tail.contiguous().view(-1)
+                    )
+                    loss = l2_warp(loss, logits) if getattr(self.config, 'use_l2warp', False) else loss
             else:
-                loss = criterion(logits.view(labels.numel(), -1), labels.view(-1))
-                loss = l2_warp(loss, logits) if self.config.use_l2warp else loss
+                loss = None
+                logits = None if getattr(self.config, 'fuse_linear_cross_entropy', False) else self.lm_head(hidden_states[:, :0])
+        else:
+            if keep_len > 0 and not getattr(self.config, 'fuse_linear_cross_entropy', False):
+                logits = self.lm_head(hidden_states[:, -keep_len:, :])
 
         if not return_dict:
             output = (logits,) + outputs[1:]
