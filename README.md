@@ -15,12 +15,22 @@ You can skip the detailed documentation below this section and follow these quic
 ### Environment Setup
 ```bash
 git submodule update --init --recursive
+curl -LsSf https://astral.sh/uv/install.sh | sh
+export PATH="$HOME/.local/bin:$PATH"
 uv sync
-uv add --editable 3rdparty/bento
 uv add --editable 3rdparty/lm-evaluation-harness --frozen
 uv add --editable 3rdparty/torchtitan --frozen
+git config user.name "Kevin Wang"
+git config user.email "kavnweng@gmail.com"
 ```
+
+Or run: `bash dev-setup.sh`
+
 When developing a specific module (e.g., `nsa`), make sure to switch to the appropriate branch in both this repo and the `bento`` submodule.
+
+Notes:
+- Python 3.11 is required (see `.python-version`).
+- On Ubuntu, if you prefer Snap: `sudo snap install astral-uv --classic`, then run `uv sync`. The official installer above is recommended.
 
 ### Configuring Models
 Model configurations are located in the `configs/` folder, typically one file per model per size. These configurations are passed directly during model instantiation. To understand how each is used, refer to the corresponding `modeling_***.py` file in bento/bento/models.

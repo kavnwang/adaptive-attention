@@ -11,7 +11,7 @@ if [ -f "$ACTIVATE_PATH" ]; then
   source "$ACTIVATE_PATH"
 else
   echo "Virtualenv not found at $ACTIVATE_PATH" >&2
-  echo "Create it with: uv sync  (or: python3 -m venv .venv && . .venv/bin/activate && pip install -r requirements.txt)" >&2
+  echo "Create it with: uv sync  (or: python3.11 -m venv .venv && . .venv/bin/activate && pip install -U pip setuptools wheel && pip install -e 3rdparty/bento -e 3rdparty/torchtitan -e 3rdparty/lm-evaluation-harness -e .)" >&2
   # continue without exiting, in case system python is intended
 fi
 
