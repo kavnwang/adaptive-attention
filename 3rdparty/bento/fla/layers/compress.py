@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import math
 import warnings
 from typing import TYPE_CHECKING, Optional, Tuple
 
@@ -78,14 +79,45 @@ class Compress(nn.Module):
         self.v_proj = nn.Linear(hidden_size, self.kv_dim, bias=qkv_bias)
         self.o_proj = nn.Linear(hidden_size, hidden_size, bias=False)
 
+        self.q_init = nn.Linear(hidden_size, hidden_size, bias=qkv_bias)
+        self.k_init = nn.Linear(hidden_size, self.kv_dim, bias=qkv_bias)
+
         if qk_norm:
             self.q_norm = RMSNorm(head_dim)
             self.k_norm = RMSNorm(head_dim)
         self.attn_norm = RMSNorm(hidden_size)
         self.mlp_norm = RMSNorm(hidden_size)
         self.rotary = RotaryEmbedding(dim=head_dim, base=rope_theta)
-        #self.compression = nn.Linear(seq_len, int(seq_len * compression_ratio))
+        self.compression = nn.Linear(seq_len, int(seq_len * compression_ratio))
         self.mlp = GatedMLP(hidden_size)
+
+        # Lightweight learnable compressed token embeddings initialized with sinusoidal positions
+        init_emb = self._build_sinusoidal_embeddings(self.num_compressed, hidden_size)
+        # Register as a Parameter so it can be learned; dtype/device will be managed by precision policies
+        self.compressed_token_emb = nn.Parameter(init_emb, requires_grad=True)
+
+    @staticmethod
+    def _build_sinusoidal_embeddings(n_positions: int, dim: int) -> torch.Tensor:
+        """Create [n_positions, dim] sinusoidal embeddings (sin/cos interleaved).
+
+        Returns float32; model precision policies (FSDP/mp) will cast as needed.
+        If dim is odd, the last column is zero-padded.
+        """
+        if n_positions <= 0:
+            n_positions = 1
+        half_dim = dim // 2
+        positions = torch.arange(n_positions, dtype=torch.float32).unsqueeze(1)
+        # classic transformer angles: 10000^{-2i/d}
+        div_term = torch.exp(
+            torch.arange(0, half_dim, dtype=torch.float32) * (-math.log(10000.0) / max(1, half_dim))
+        )
+        angles = positions * div_term  # [n, half]
+        emb = torch.empty(n_positions, dim, dtype=torch.float32)
+        emb[:, 0:2 * half_dim:2] = torch.sin(angles)
+        emb[:, 1:2 * half_dim:2] = torch.cos(angles)
+        if dim % 2 == 1:
+            emb[:, -1] = 0.0
+        return emb
     
     def init_compressed_tokens_mlp(
         self,
@@ -95,9 +127,8 @@ class Compress(nn.Module):
         compression_length = int(hidden_states.shape[1] * self.compression_ratio)
         compressed_tokens = hidden_states[:,compression_length:,:]
         '''
-        #compressed_tokens = self.compression(hidden_states.transpose(-1,-2)).transpose(-1,-2)
-        #return compressed_tokens
-        return None
+        compressed_tokens = self.compression(hidden_states.transpose(-1,-2)).transpose(-1,-2)
+        return compressed_tokens
 
     def init_compressed_tokens_suffix(
         self,
@@ -107,19 +138,27 @@ class Compress(nn.Module):
         compression_length = int(hidden_states.shape[1] * self.compression_ratio)
         compressed_tokens = hidden_states[:,compression_length:,:]
         '''
-        compressed_tokens = hidden_states[:,int(self.seq_len * self.compression_ratio):,:]
+        num_compressed = int(self.seq_len * self.compression_ratio)
+        compressed_tokens = hidden_states[:,-num_compressed:,:]
         return compressed_tokens
 
     def init_compressed_tokens_attn(
         self,
         hidden_states: torch.Tensor, #b s d
     ):  
-        '''
-        compression_length = int(hidden_states.shape[1] * self.compression_ratio)
-        compressed_tokens = hidden_states[:,compression_length:,:]
-        '''
-        compressed_tokens = hidden_states[:,int(self.seq_len * self.compression_ratio):,:]
-        return compressed_tokens
+        """Return B x num_compressed x hidden_size learnable tokens.
+
+        Efficient: uses a single small parameter matrix (num_compressed x hidden_size)
+        initialized from sinusoidal positions; batched by expand without extra copies.
+        """
+        bsz = hidden_states.shape[0]
+        emb = self.compressed_token_emb
+        # Ensure dtype/device match the incoming hidden states for compute efficiency
+        if emb.dtype != hidden_states.dtype:
+            emb = emb.to(hidden_states.dtype)
+        if emb.device != hidden_states.device:
+            emb = emb.to(hidden_states.device)
+        return emb.unsqueeze(0).expand(bsz, -1, -1)
 
 
     def forward(
@@ -154,7 +193,6 @@ class Compress(nn.Module):
             output = self.mlp(compressed_tokens)
             compressed_tokens = output + compressed_tokens
         return compressed_tokens
-
 
 
 
