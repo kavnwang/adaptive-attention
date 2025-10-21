@@ -173,7 +173,10 @@ class AutoencoderModel(AutoencoderPreTrainedModel):
             num_heads=config.num_heads,
             seq_len=config.seq_len,
             compression_ratio=config.compression_ratio,
-            compression_depth=config.compression_depth
+            compression_depth=config.compression_depth,
+            num_compressed=(config.compression_tokens if getattr(config, "compression_tokens", 0) else None),
+            # Route init method from config; num_compressed defaults to ratio*seq_len
+            init_method=getattr(config, "compress_init_method", "suffix"),
         )
         self.upsample = Upsample(
             hidden_size=config.hidden_size,

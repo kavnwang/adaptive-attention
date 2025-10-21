@@ -40,6 +40,10 @@ class Compress(nn.Module):
         compression_ratio: float = 0.5,
         compression_depth: int = 2,
         seq_len: int = 8192,
+        # Optional explicit number of compressed tokens; if None uses ratio*seq_len
+        num_compressed: Optional[int] = None,
+        # Initialization method: 'suffix' | 'mlp' | 'attn'
+        init_method: str = "suffix",
         num_kv_heads: Optional[int] = None,
         qkv_bias: bool = False,
         qk_norm: bool = False,
@@ -70,6 +74,7 @@ class Compress(nn.Module):
         self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
         self.layer_idx = layer_idx
+        self.init_method = init_method
 
         if flash_attn_func is None:
             raise ImportError("Please install Flash Attention via `pip install flash-attn --no-build-isolation` first")
@@ -91,34 +96,6 @@ class Compress(nn.Module):
         self.compression = nn.Linear(seq_len, int(seq_len * compression_ratio))
         self.mlp = GatedMLP(hidden_size)
 
-        # Lightweight learnable compressed token embeddings initialized with sinusoidal positions
-        init_emb = self._build_sinusoidal_embeddings(self.num_compressed, hidden_size)
-        # Register as a Parameter so it can be learned; dtype/device will be managed by precision policies
-        self.compressed_token_emb = nn.Parameter(init_emb, requires_grad=True)
-
-    @staticmethod
-    def _build_sinusoidal_embeddings(n_positions: int, dim: int) -> torch.Tensor:
-        """Create [n_positions, dim] sinusoidal embeddings (sin/cos interleaved).
-
-        Returns float32; model precision policies (FSDP/mp) will cast as needed.
-        If dim is odd, the last column is zero-padded.
-        """
-        if n_positions <= 0:
-            n_positions = 1
-        half_dim = dim // 2
-        positions = torch.arange(n_positions, dtype=torch.float32).unsqueeze(1)
-        # classic transformer angles: 10000^{-2i/d}
-        div_term = torch.exp(
-            torch.arange(0, half_dim, dtype=torch.float32) * (-math.log(10000.0) / max(1, half_dim))
-        )
-        angles = positions * div_term  # [n, half]
-        emb = torch.empty(n_positions, dim, dtype=torch.float32)
-        emb[:, 0:2 * half_dim:2] = torch.sin(angles)
-        emb[:, 1:2 * half_dim:2] = torch.cos(angles)
-        if dim % 2 == 1:
-            emb[:, -1] = 0.0
-        return emb
-    
     def init_compressed_tokens_mlp(
         self,
         hidden_states: torch.Tensor, #b s d
@@ -142,32 +119,18 @@ class Compress(nn.Module):
         compressed_tokens = hidden_states[:,-num_compressed:,:]
         return compressed_tokens
 
-    def init_compressed_tokens_attn(
-        self,
-        hidden_states: torch.Tensor, #b s d
-    ):  
-        """Return B x num_compressed x hidden_size learnable tokens.
-
-        Efficient: uses a single small parameter matrix (num_compressed x hidden_size)
-        initialized from sinusoidal positions; batched by expand without extra copies.
-        """
-        bsz = hidden_states.shape[0]
-        emb = self.compressed_token_emb
-        # Ensure dtype/device match the incoming hidden states for compute efficiency
-        if emb.dtype != hidden_states.dtype:
-            emb = emb.to(hidden_states.dtype)
-        if emb.device != hidden_states.device:
-            emb = emb.to(hidden_states.device)
-        return emb.unsqueeze(0).expand(bsz, -1, -1)
-
-
     def forward(
         self,
         hidden_states: torch.Tensor,
         **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         batch_size, _, _ = hidden_states.shape
-        compressed_tokens = self.init_compressed_tokens_suffix(hidden_states)
+        if self.init_method == "suffix":
+            compressed_tokens = self.init_compressed_tokens_suffix(hidden_states)
+        elif self.init_method == "mlp":
+            compressed_tokens = self.init_compressed_tokens_mlp(hidden_states)
+        else:
+            compressed_tokens = self.init_compressed_tokens_mlp(hidden_states)
         
         for _ in range(self.compression_depth):
             residual = torch.cat([hidden_states, compressed_tokens], dim=-2)
@@ -181,7 +144,7 @@ class Compress(nn.Module):
             if self.qk_norm:
                 q = self.q_norm(q)
                 k = self.k_norm(k)
-            # insert RoPE here
+
             qk_similarities = torch.einsum("bsnk,btnk->bsnt", q, k)
             qk_similarities = qk_similarities / (self.head_dim ** 0.5)
             attn_scores = torch.softmax(qk_similarities, dim=-1)
@@ -193,6 +156,5 @@ class Compress(nn.Module):
             output = self.mlp(compressed_tokens)
             compressed_tokens = output + compressed_tokens
         return compressed_tokens
-
 
 

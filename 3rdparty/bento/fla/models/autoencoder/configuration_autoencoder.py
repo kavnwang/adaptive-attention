@@ -44,6 +44,7 @@ class AutoencoderConfig(PretrainedConfig):
         compression_ratio: float = 0.0625,
         compression_depth: int = 2,
         upsample_depth: int = 1,
+        compress_init_method: str = "suffix",
         compression_layer_idx: Optional[int] = 6,
         masked_tokens: int = 0,
         compression_tokens: int = 0,
@@ -81,6 +82,7 @@ class AutoencoderConfig(PretrainedConfig):
         self.compression_ratio = compression_ratio
         self.compression_depth = compression_depth
         self.upsample_depth = upsample_depth
+        self.compress_init_method = compress_init_method
         self.compression_layer_idx = compression_layer_idx
         self.masked_tokens = masked_tokens
         self.compression_tokens = compression_tokens

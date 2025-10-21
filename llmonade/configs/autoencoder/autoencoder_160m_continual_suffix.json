@@ -19,7 +19,7 @@
   "vocab_size": 50304,
   "torch_dtype": "bfloat16",
   "compression_ratio": 0.0625,
-  "compress_init_method": "mlp",
+  "compress_init_method": "suffix",
   "compression_depth": 1,
   "upsample_depth": 1,
   "seq_len": 8192,

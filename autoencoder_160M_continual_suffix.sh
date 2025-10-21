@@ -1,5 +1,5 @@
 #!/bin/bash
-# transformer_160M_continual.sh
+# autoencoder_160M_continual.sh
 
 set -e  # Exit on error
 
@@ -15,11 +15,8 @@ else
   # continue without exiting, in case system python is intended
 fi
 
-# Change to the right directory
-#cd /workspace/adaptive-attention
-
 # Create necessary directories
-mkdir -p exp/transformer_continual_160M
+mkdir -p exp/autoencoder_continual_160M_suffix
 mkdir -p logs
 
 # Set environment variables
@@ -30,15 +27,19 @@ mkdir -p $TRITON_CACHE_DIR
 export PYTHONPATH="$(pwd)/3rdparty/bento:${PYTHONPATH}"
 
 # Log file with timestamp
-LOGFILE="logs/train_transformer_continual_160M_$(date +%Y%m%d_%H%M%S).log"
+LOGFILE="logs/train_autoencoder_160M_continual_$(date +%Y%m%d_%H%M%S).log"
 
-echo "Starting training - logging to $LOGFILE"
+echo "Starting AE continual training - logging to $LOGFILE"
 
-# Run training with torchrun (sets LOCAL_RANK and other distributed vars)
+# Notes:
+# - We initialize 12 transformer layers from the 160M transformer checkpoint (latest -> step-30000),
+#   and the compressor/upsampler from the AE checkpoint (latest -> step-30000).
+# - Multiple pretrained sources are provided as comma-separated lists; train.py applies them in order.
+
 torchrun --nproc_per_node=1 --nnodes=1 -m llmonade.train \
   --job.config_file llmonade/configs/llmon.toml \
-  --job.dump_folder exp/transformer_continual_160M \
-  --model.config llmonade/configs/transformer/pythia_160m_continual.json \
+  --job.dump_folder exp/autoencoder_continual_160M_suffix \
+  --model.config llmonade/configs/autoencoder/autoencoder_160m_continual_suffix.json \
   --model.tokenizer_path EleutherAI/pythia-160m \
   --optimizer.name AdamW \
   --optimizer.eps 1e-15 \
@@ -69,4 +70,4 @@ torchrun --nproc_per_node=1 --nnodes=1 -m llmonade.train \
   --metrics.log_freq 1 \
   --comm.train_timeout_seconds 240 2>&1 | tee "$LOGFILE"
 
-echo "Training complete!"
+echo "AE continual training complete!"
