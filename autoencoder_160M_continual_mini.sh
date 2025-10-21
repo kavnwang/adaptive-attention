@@ -51,13 +51,12 @@ torchrun --nproc_per_node=1 --nnodes=1 -m llmonade.train \
   --training.batch_size 16 \
   --training.seq_len 4608 \
   --training.gradient_accumulation_steps 1 \
-  --training.steps 20000 \
+  --training.steps 6000 \
   --training.max_norm 1.0 \
   --training.skip_nan_inf \
-  --training.dataset HuggingFaceFW/fineweb-edu \
+  --training.dataset manu/project_gutenberg \
   --training.streaming \
-  --training.dataset_name sample-10BT \
-  --training.dataset_split train \
+  --training.dataset_split en \
   --training.mixed_precision_param bfloat16 \
   --training.num_workers 8 \
   --training.prefetch_factor 2 \

@@ -317,6 +317,10 @@ def main(job_config: JobConfig):
 
     logger.info(f"Loading model config from {job_config.model.config}")
     model_config = AutoConfig.from_pretrained(job_config.model.config)
+    # Detect if we are using the autoencoder predictor variant
+    is_autoencoder_predictor = (
+        getattr(model_config, "model_type", None) == "autoencoder_predictor"
+    )
 
     # Save model config to experiment directory
     config_save_path = os.path.join(job_config.job.dump_folder, "model_config.json")
@@ -540,6 +544,68 @@ def main(job_config: JobConfig):
                     f"{color.yellow}Failed to freeze layers: {e}. "
                     f"Continuing without freezing.{color.reset}"
                 )
+
+        # Summarize which parameters remain trainable after freezing
+        try:
+            expected_prefixes = ("model.compress", "model.upsample")
+            total_params = 0
+            trainable_params = 0
+            by_group = {
+                "compress": 0,
+                "upsample": 0,
+                "lm_head": 0,
+                "layers": 0,
+                "embeddings": 0,
+                "norm": 0,
+                "other": 0,
+            }
+            unexpected_names = []
+
+            for part in model_parts:
+                for name, p in part.named_parameters():
+                    # Count only floating-point parameters
+                    try:
+                        n = int(p.numel()) if p.data.is_floating_point() else 0
+                    except Exception:
+                        n = 0
+                    total_params += n
+                    if p.requires_grad:
+                        trainable_params += n
+                        if name.startswith("model.compress"):
+                            by_group["compress"] += n
+                        elif name.startswith("model.upsample"):
+                            by_group["upsample"] += n
+                        elif name.startswith("lm_head"):
+                            by_group["lm_head"] += n
+                        elif name.startswith("model.layers"):
+                            by_group["layers"] += n
+                        elif name.startswith("model.embeddings"):
+                            by_group["embeddings"] += n
+                        elif name.startswith("model.norm"):
+                            by_group["norm"] += n
+                        else:
+                            by_group["other"] += n
+                        if not name.startswith(expected_prefixes):
+                            if len(unexpected_names) < 20:
+                                unexpected_names.append(name)
+
+            def _fmt(n: int) -> str:
+                return f"{n/1e6:.2f}M"
+
+            nonzero_groups = {k: _fmt(v) for k, v in by_group.items() if v > 0}
+            logger.info(
+                f"Trainable parameter summary: total={_fmt(total_params)}, "
+                f"trainable={_fmt(trainable_params)}, groups={nonzero_groups}"
+            )
+            if unexpected_names:
+                logger.info(
+                    "Unexpected trainable parameters (not in compress/upsample), samples: "
+                    + ", ".join(unexpected_names)
+                )
+            else:
+                logger.info("OK: only compress/upsample are trainable.")
+        except Exception as e:
+            logger.warning(f"Failed to summarize trainable params: {e}")
 
     # Apply token subset optimization if enabled
     if job_config.training.enable_token_subset_optimization:
@@ -1074,12 +1140,18 @@ def main(job_config: JobConfig):
                 else:
                     # Non-PP forward / backward
                     with train_context(optional_context_parallel_ctx):
-                        output = model(
+                        # Pass compression ratio only for autoencoder predictor models
+                        forward_kwargs = dict(
                             input_ids=input_ids,
                             labels=labels,
                             position_ids=position_ids,
                             cu_seqlens=cu_seqlens,
                         )
+                        if is_autoencoder_predictor:
+                            forward_kwargs["compression_ratio"] = (
+                                job_config.training.compression_ratio
+                            )
+                        output = model(**forward_kwargs)
                         loss = (
                             output.loss
                             / job_config.training.gradient_accumulation_steps

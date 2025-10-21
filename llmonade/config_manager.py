@@ -386,6 +386,12 @@ class JobConfig:
             help="Apply answer-only masking for digit lookup datasets (masks everything except values after ':')",
         )
         self.parser.add_argument(
+            "--training.compression_ratio",
+            type=float,
+            default=0.5,
+            help="Compression ratio to pass to autoencoder predictor models during forward().",
+        )
+        self.parser.add_argument(
             "--training.gradient_accumulation_steps",
             type=int,
             default=1,

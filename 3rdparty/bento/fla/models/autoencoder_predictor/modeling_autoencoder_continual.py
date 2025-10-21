@@ -2,7 +2,164 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Any, List, Optional, Tuple, Union
+
+import torch
+import torch.nn as nn
+from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
+from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
+from fla.modules.l2warp import l2_warp
+from transformers.utils.deprecation import deprecate_kwarg
+
+from fla.models.autoencoder.modeling_autoencoder import (
+    AutoencoderPreTrainedModel as BasePreTrained,
+    AutoencoderModel as BaseModel,
+    AutoencoderForCausalLM as BaseForCausalLM,
+)
+from fla.models.autoencoder_predictor.configuration_autoencoder_continual import (
+    AutoencoderPredictorConfig,
+)
+
+if TYPE_CHECKING:
+    from transformers.processing_utils import Unpack
+
+
+class AutoencoderPredictorPreTrainedModel(BasePreTrained):
+    config_class = AutoencoderPredictorConfig
+
+
+class AutoencoderPredictorModel(AutoencoderPredictorPreTrainedModel, BaseModel):
+    """
+    Thin wrapper so training can use model_type="autoencoder_continual"
+    while reusing the base autoencoder implementation.
+    """
+
+    def __init__(self, config: AutoencoderPredictorConfig) -> "AutoencoderPredictorModel":
+        super().__init__(config)
+
+
+class AutoencoderPredictorForCausalLM(AutoencoderPredictorPreTrainedModel, BaseForCausalLM):
+    def __init__(self, config: AutoencoderPredictorConfig):
+        super().__init__(config)
+
+    @deprecate_kwarg("num_logits_to_keep", version="4.50", new_name="logits_to_keep")
+    def forward(
+        self,
+        input_ids: torch.LongTensor = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        past_key_values: Optional[List[torch.FloatTensor]] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        labels: Optional[torch.LongTensor] = None,
+        use_cache: Optional[bool] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+        compression_ratio: Optional[float] = None,
+        logits_to_keep: Optional[int] = 0,
+        **kwargs: Unpack[Any]
+    ) -> Union[Tuple, CausalLMOutputWithPast]:
+        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+        output_hidden_states = (
+            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+        )
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        # Compute loss alignment positions dynamically from compression ratio
+        # using the full sequence length of model outputs.
+        # masked_tokens := first half of sequence, compression_tokens := ratio * seq_len
+        masked_tokens_for_loss = None  # set after obtaining hidden_states
+        compression_tokens_for_loss = None  # set after obtaining hidden_states
+
+        outputs = self.model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            past_key_values=past_key_values,
+            inputs_embeds=inputs_embeds,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+            compression_ratio=compression_ratio,
+            **kwargs,
+        )
+
+        model_outputs = outputs
+        ae_inputs = None
+        if isinstance(outputs, tuple) and len(outputs) == 2:
+            ae_inputs, model_outputs = outputs
+
+        hidden_states = (
+            model_outputs.last_hidden_state if return_dict and hasattr(model_outputs, "last_hidden_state") else outputs[0]
+        )
+
+        logits = None if getattr(self.config, "fuse_linear_cross_entropy", False) else self.lm_head(
+            hidden_states[:, -logits_to_keep:]
+        )
+
+        loss = None
+        if labels is not None:
+            # Determine dynamic masked/compressed token counts from output sequence length
+            seq_len_out = hidden_states.size(1)
+            ratio = compression_ratio
+            masked_tokens_for_loss = seq_len_out // 2
+            compression_tokens_for_loss = int(ratio * seq_len_out)
+            # Build criterion
+            if getattr(self, "criterion", None) is None:
+                if getattr(self.config, "fuse_linear_cross_entropy", False):
+                    criterion = FusedLinearCrossEntropyLoss(use_l2warp=getattr(self.config, "use_l2warp", False))
+                elif getattr(self.config, "fuse_cross_entropy", False):
+                    criterion = FusedCrossEntropyLoss(inplace_backward=True)
+                else:
+                    criterion = nn.CrossEntropyLoss()
+            else:
+                criterion = self.criterion
+
+            labels = labels.to(hidden_states.device)
+            # Shift left by 1 for next-token prediction
+            labels = torch.cat((labels[..., 1:], torch.full_like(labels[:, :1], criterion.ignore_index)), 1)
+
+            # Determine which part to supervise and align labels/predictions
+            if masked_tokens_for_loss > 0:
+                m = masked_tokens_for_loss
+                c = min(compression_tokens_for_loss, m)
+                hs_tail = hidden_states[:, c:, :]
+                labels_tail = labels[:, m:]
+                tail_len = min(hs_tail.size(1), labels_tail.size(1))
+                hs_for_loss = hs_tail[:, :tail_len, :]
+                labels_for_loss = labels_tail[:, :tail_len]
+            else:
+                keep_len = min(seq_len_out, labels.size(1))
+                hs_for_loss = hidden_states[:, :keep_len, :]
+                labels_for_loss = labels[:, :keep_len]
+
+            if getattr(self.config, "fuse_linear_cross_entropy", False):
+                loss = criterion(hs_for_loss, labels_for_loss, self.lm_head.weight, self.lm_head.bias)
+            else:
+                logits_for_loss = self.lm_head(hs_for_loss)
+                loss = criterion(
+                    logits_for_loss.contiguous().view(-1, logits_for_loss.size(-1)),
+                    labels_for_loss.contiguous().view(-1),
+                )
+                loss = l2_warp(loss, logits_for_loss) if getattr(self.config, "use_l2warp", False) else loss
+
+        if not return_dict:
+            output = (logits,) + outputs[1:]
+            return (loss,) + output if loss is not None else output
+
+        return CausalLMOutputWithPast(
+            loss=loss,
+            logits=logits,
+            past_key_values=model_outputs.past_key_values if hasattr(model_outputs, "past_key_values") else None,
+            hidden_states=model_outputs.hidden_states if hasattr(model_outputs, "hidden_states") else None,
+            attentions=model_outputs.attentions if hasattr(model_outputs, "attentions") else None,
+        )
+
+# -*- coding: utf-8 -*-
+
+
+
 import math
+import os
 import warnings
 from typing import TYPE_CHECKING, Any, List, Optional, Tuple, Union
 
@@ -15,7 +172,6 @@ from transformers.utils.deprecation import deprecate_kwarg
 
 from fla.layers.attn import Attention
 from fla.layers.compress import Compress
-from fla.layers.upsample import Upsample
 from fla.models.autoencoder.configuration_autoencoder import AutoencoderConfig
 from fla.models.utils import Cache, FLAGenerationMixin
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
@@ -107,7 +263,8 @@ class TransformerBlock(GradientCheckpointingLayer):
 
 class AutoencoderPreTrainedModel(PreTrainedModel):
 
-    config_class = AutoencoderConfig
+    # Use predictor config to ensure proper HF binding
+    config_class = AutoencoderPredictorConfig
     base_model_prefix = 'model'
     supports_gradient_checkpointing = True
     _no_split_modules = ['TransformerBlock']
@@ -159,7 +316,7 @@ class AutoencoderModel(AutoencoderPreTrainedModel):
 
     def __init__(
         self,
-        config: AutoencoderConfig
+        config: AutoencoderPredictorConfig
     ) -> AutoencoderModel:
         super().__init__(config)
         self.padding_idx = config.pad_token_id
@@ -171,18 +328,9 @@ class AutoencoderModel(AutoencoderPreTrainedModel):
         self.compress = Compress(
             hidden_size=config.hidden_size,
             num_heads=config.num_heads,
-            seq_len=config.seq_len,
-            compression_ratio=config.compression_ratio,
+            #compression_ratio=config.compression_ratio,
             compression_depth=config.compression_depth,
-            # Route init method from config; num_compressed defaults to ratio*seq_len
             init_method=getattr(config, "compress_init_method", "suffix"),
-        )
-        self.upsample = Upsample(
-            hidden_size=config.hidden_size,
-            num_heads=config.num_heads,
-            seq_len=int(config.seq_len * config.compression_ratio),
-            upsample_ratio=1.0 / config.compression_ratio,
-            upsample_depth=config.upsample_depth
         )
 
         self.gradient_checkpointing = False
@@ -205,6 +353,7 @@ class AutoencoderModel(AutoencoderPreTrainedModel):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        compression_ratio: Optional[float] = None,
         **kwargs: Unpack[Any]
     ) -> Tuple[torch.FloatTensor, Union[Tuple, CausalLMOutputWithPast]]:
         if output_attentions:
@@ -231,9 +380,27 @@ class AutoencoderModel(AutoencoderPreTrainedModel):
 
         # embed positions
         hidden_states = inputs_embeds
-        masked_tokens: int = self.config.masked_tokens
-        compression_tokens: int = self.config.compression_tokens
+        # Compute dynamic masked/compressed token counts from input sequence length
+        # masked_tokens := first half of sequence, compression_tokens := ratio * seq_len
+        seq_len_in = hidden_states.size(1)
+        ratio = compression_ratio
+        masked_tokens: int = seq_len_in // 2
+        compression_tokens: int = int(ratio * seq_len_in)
         compression_layer_idx: int = self.config.compression_layer_idx
+
+        # Debug printing (rank0 only)
+        if os.environ.get("AEP_DEBUG"):
+            try:
+                import torch.distributed as dist
+                rank = dist.get_rank() if dist.is_initialized() else 0
+            except Exception:
+                rank = 0
+            if rank == 0:
+                print(
+                    f"[AEP-DEBUG][Model] seq_len_in={seq_len_in} ratio={ratio} "
+                    f"masked_tokens(m)={masked_tokens} compression_tokens(c)={compression_tokens} "
+                    f"comp_layer_idx={compression_layer_idx}"
+                )
 
         all_hidden_states = () if output_hidden_states else None
         all_attns = () if output_attentions else None
@@ -293,21 +460,26 @@ class AutoencoderModel(AutoencoderPreTrainedModel):
             if compression_layer_idx is not None and idx == compression_layer_idx and masked_tokens > 0:
                 bsz, seq_len, dim = hidden_states.size()
                 m = min(masked_tokens, seq_len)
-                # Derive compressed length from tokens if provided, otherwise from ratio
-                c = min((compression_tokens if compression_tokens > 0 else int(m * self.config.compression_ratio)), m)
+                c = min(compression_tokens, m)
                 prefix = hidden_states[:, :m, :]
                 tail = hidden_states[:, m:, :]
-                compressed_prefix = self.compress(prefix, compression_ratio=self.config.compression_ratio)
+                compressed_prefix = self.compress(prefix, compression_ratio)
+                if os.environ.get("AEP_DEBUG"):
+                    try:
+                        import torch.distributed as dist
+                        rank = dist.get_rank() if dist.is_initialized() else 0
+                    except Exception:
+                        rank = 0
+                    if rank == 0:
+                        print(
+                            f"[AEP-DEBUG][Model] at layer {idx}: seq_len_before={seq_len} m={m} c={c} "
+                            f"prefix={tuple(prefix.shape)} tail={tuple(tail.shape)} "
+                            f"compressed_prefix={tuple(compressed_prefix.shape)}"
+                        )
                 hidden_states = torch.cat([compressed_prefix, tail], dim=1)
 
         hidden_states = self.norm(hidden_states)
-        if compression_layer_idx is None:
-            inputs = hidden_states
-            hidden_states = self.compress(hidden_states, compression_ratio=self.config.compression_ratio)
-            hidden_states = self.upsample(hidden_states)
-            hidden_states = self.norm(hidden_states)
-        else:
-            inputs = None
+        inputs = None
 
         if output_hidden_states:
             all_hidden_states += (hidden_states,)
@@ -355,7 +527,6 @@ class AutoencoderForCausalLM(AutoencoderPreTrainedModel, FLAGenerationMixin):
     def get_decoder(self):
         return self.model
 
-    @deprecate_kwarg("num_logits_to_keep", version="4.50", new_name="logits_to_keep")
     def forward(
         self,
         input_ids: torch.LongTensor = None,
@@ -367,6 +538,7 @@ class AutoencoderForCausalLM(AutoencoderPreTrainedModel, FLAGenerationMixin):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        compression_ratio: Optional[float] = None,
         logits_to_keep: Optional[int] = 0,
         **kwargs: Unpack[Any]
     ) -> Union[Tuple, CausalLMOutputWithPast]:
@@ -376,8 +548,9 @@ class AutoencoderForCausalLM(AutoencoderPreTrainedModel, FLAGenerationMixin):
         )
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-        masked_tokens_for_loss = self.config.masked_tokens
-        compression_tokens_for_loss = self.config.compression_tokens
+        # Compute loss alignment positions dynamically from compression ratio
+        masked_tokens_for_loss = None  # set after obtaining hidden_states
+        compression_tokens_for_loss = None  # set after obtaining hidden_states
 
         outputs = self.model(
             input_ids=input_ids,
@@ -388,6 +561,7 @@ class AutoencoderForCausalLM(AutoencoderPreTrainedModel, FLAGenerationMixin):
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
+            compression_ratio=compression_ratio,
             **kwargs
         )
 
@@ -421,19 +595,41 @@ class AutoencoderForCausalLM(AutoencoderPreTrainedModel, FLAGenerationMixin):
             labels = torch.cat((labels[..., 1:], torch.full_like(labels[:, :1], criterion.ignore_index)), 1)
             # Determine which part to supervise and align labels/predictions
             seq_len_out = hidden_states.size(1)
+            ratio = compression_ratio
+            masked_tokens_for_loss = seq_len_out // 2
+            compression_tokens_for_loss = int(ratio * seq_len_out)
+            if os.environ.get("AEP_DEBUG"):
+                try:
+                    import torch.distributed as dist
+                    rank = dist.get_rank() if dist.is_initialized() else 0
+                except Exception:
+                    rank = 0
+                if rank == 0:
+                    print(
+                        f"[AEP-DEBUG][Loss] seq_len_out={seq_len_out} ratio={ratio} "
+                        f"masked_tokens_for_loss(m)={masked_tokens_for_loss} "
+                        f"compression_tokens_for_loss(c)={compression_tokens_for_loss}"
+                    )
             if masked_tokens_for_loss > 0:
                 # Align tail: predictions at indices [c:] correspond to labels at [m:]
                 m = masked_tokens_for_loss
-                # If explicit compression_tokens is provided and > 0, use it; otherwise derive from ratio
-                if compression_tokens_for_loss and compression_tokens_for_loss > 0:
-                    c = min(compression_tokens_for_loss, m)
-                else:
-                    c = min(int(m * self.config.compression_ratio), m)
+                c = min(compression_tokens_for_loss, m)
                 hs_tail = hidden_states[:, c:, :]
                 labels_tail = labels[:, m:]
                 tail_len = min(hs_tail.size(1), labels_tail.size(1))
                 hs_for_loss = hs_tail[:, :tail_len, :]
                 labels_for_loss = labels_tail[:, :tail_len]
+                if os.environ.get("AEP_DEBUG"):
+                    try:
+                        import torch.distributed as dist
+                        rank = dist.get_rank() if dist.is_initialized() else 0
+                    except Exception:
+                        rank = 0
+                    if rank == 0:
+                        print(
+                            f"[AEP-DEBUG][Loss] m={m} c={c} hs_tail={tuple(hs_tail.shape)} "
+                            f"labels_tail={tuple(labels_tail.shape)} tail_len={tail_len}"
+                        )
             else:
                 # Default: full sequence up to available outputs
                 keep_len = min(seq_len_out, labels.size(1))

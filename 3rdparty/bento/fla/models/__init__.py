@@ -48,6 +48,13 @@ from fla.models.autoencoder_continual import (
     AutoencoderContinualModel,
 )
 
+# Ensure predictor variant is imported so AutoConfig registry is populated
+from fla.models.autoencoder_predictor import (
+    AutoencoderPredictorConfig,
+    AutoencoderPredictorForCausalLM,
+    AutoencoderPredictorModel,
+)
+
 __all__ = [
     'ABCConfig', 'ABCForCausalLM', 'ABCModel',
     'BitNetConfig', 'BitNetForCausalLM', 'BitNetModel',
@@ -80,4 +87,5 @@ __all__ = [
     'TransformerConfig', 'TransformerForCausalLM', 'TransformerModel',
     'TransformerContinualConfig', 'TransformerContinualForCausalLM', 'TransformerContinualModel',
     'AutoencoderContinualConfig', 'AutoencoderContinualForCausalLM', 'AutoencoderContinualModel',
+    'AutoencoderPredictorConfig', 'AutoencoderPredictorForCausalLM', 'AutoencoderPredictorModel',
 ]

@@ -87,6 +87,10 @@ from fla.models import (
     AutoencoderContinualForCausalLM,
     AutoencoderContinualModel,
 )
+from fla.models.autoencoder_predictor import (
+    AutoencoderPredictorForCausalLM,
+    AutoencoderPredictorModel,
+)
 
 __all__ = [
     'ABCAttention', 'ABCForCausalLM', 'ABCModel',
@@ -95,6 +99,7 @@ __all__ = [
     'BitAttention', 'BitNetForCausalLM', 'BitNetModel',
     'AutoencoderForCausalLM', 'AutoencoderModel',
     'AutoencoderContinualForCausalLM', 'AutoencoderContinualModel',
+    'AutoencoderPredictorForCausalLM', 'AutoencoderPredictorModel',
     'CompressionPredictorModel',
     'Compress', 'Upsample',
     'Comba', 'CombaForCausalLM', 'CombaModel',

@@ -21,8 +21,8 @@
   "compression_ratio": 0.0625,
   "compression_depth": 2,
   "upsample_depth": 1,
-  "seq_len": 8192,
+  "seq_len": 16384,
   "compression_layer_idx": 6,
   "masked_tokens": 8192,
-  "compression_tokens": 512
+  "compression_tokens": 0
 }

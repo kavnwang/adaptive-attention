@@ -174,7 +174,6 @@ class AutoencoderModel(AutoencoderPreTrainedModel):
             seq_len=config.seq_len,
             compression_ratio=config.compression_ratio,
             compression_depth=config.compression_depth,
-            num_compressed=(config.compression_tokens if getattr(config, "compression_tokens", 0) else None),
             init_method=getattr(config, "compress_init_method", "suffix"),
         )
         self.upsample = Upsample(
@@ -258,7 +257,7 @@ class AutoencoderModel(AutoencoderPreTrainedModel):
                 all_attns += (layer_outputs[1],)
         hidden_states = self.norm(hidden_states)
         inputs = hidden_states
-        hidden_states = self.compress(hidden_states)
+        hidden_states = self.compress(hidden_states, compression_ratio=self.config.compression_ratio)
         hidden_states = self.upsample(hidden_states)
         hidden_states = self.norm(hidden_states)
 
