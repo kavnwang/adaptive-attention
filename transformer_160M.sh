@@ -3,6 +3,18 @@
 
 set -e  # Exit on error
 
+# Activate local virtualenv if present
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ACTIVATE_PATH="$SCRIPT_DIR/.venv/bin/activate"
+if [ -f "$ACTIVATE_PATH" ]; then
+  # shellcheck source=/dev/null
+  source "$ACTIVATE_PATH"
+else
+  echo "Virtualenv not found at $ACTIVATE_PATH" >&2
+  echo "Create it with: uv sync  (or: python3 -m venv .venv && . .venv/bin/activate && pip install -r requirements.txt)" >&2
+  # continue without exiting, in case system python is intended
+fi
+
 # Change to the right directory
 #cd /workspace/adaptive-attention
 
@@ -57,4 +69,3 @@ torchrun --nproc_per_node=1 --nnodes=1 -m llmonade.train \
   --comm.train_timeout_seconds 240 2>&1 | tee "$LOGFILE"
 
 echo "Training complete!"
-
