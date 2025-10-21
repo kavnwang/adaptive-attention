@@ -84,10 +84,10 @@ class Compress(nn.Module):
         self.attn_norm = RMSNorm(hidden_size)
         self.mlp_norm = RMSNorm(hidden_size)
         self.rotary = RotaryEmbedding(dim=head_dim, base=rope_theta)
-        self.compression = nn.Linear(seq_len, int(seq_len * compression_ratio))
+        #self.compression = nn.Linear(seq_len, int(seq_len * compression_ratio))
         self.mlp = GatedMLP(hidden_size)
     
-    def init_compressed_tokens(
+    def init_compressed_tokens_mlp(
         self,
         hidden_states: torch.Tensor, #b s d
     ):  
@@ -95,7 +95,30 @@ class Compress(nn.Module):
         compression_length = int(hidden_states.shape[1] * self.compression_ratio)
         compressed_tokens = hidden_states[:,compression_length:,:]
         '''
-        compressed_tokens = self.compression(hidden_states.transpose(-1,-2)).transpose(-1,-2)
+        #compressed_tokens = self.compression(hidden_states.transpose(-1,-2)).transpose(-1,-2)
+        #return compressed_tokens
+        return None
+
+    def init_compressed_tokens_suffix(
+        self,
+        hidden_states: torch.Tensor, #b s d
+    ):  
+        '''
+        compression_length = int(hidden_states.shape[1] * self.compression_ratio)
+        compressed_tokens = hidden_states[:,compression_length:,:]
+        '''
+        compressed_tokens = hidden_states[:,int(self.seq_len * self.compression_ratio):,:]
+        return compressed_tokens
+
+    def init_compressed_tokens_attn(
+        self,
+        hidden_states: torch.Tensor, #b s d
+    ):  
+        '''
+        compression_length = int(hidden_states.shape[1] * self.compression_ratio)
+        compressed_tokens = hidden_states[:,compression_length:,:]
+        '''
+        compressed_tokens = hidden_states[:,int(self.seq_len * self.compression_ratio):,:]
         return compressed_tokens
 
 
@@ -104,8 +127,8 @@ class Compress(nn.Module):
         hidden_states: torch.Tensor,
         **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
-        batch_size, seq_len, _ = hidden_states.shape
-        compressed_tokens = self.init_compressed_tokens(hidden_states)
+        batch_size, _, _ = hidden_states.shape
+        compressed_tokens = self.init_compressed_tokens_suffix(hidden_states)
         
         for _ in range(self.compression_depth):
             residual = torch.cat([hidden_states, compressed_tokens], dim=-2)
