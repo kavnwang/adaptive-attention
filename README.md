@@ -20,6 +20,11 @@ export PATH="$HOME/.local/bin:$PATH"
 uv sync
 uv add --editable 3rdparty/lm-evaluation-harness --frozen
 uv add --editable 3rdparty/torchtitan --frozen
+git config user.name "Kevin Wang"
+git config user.email "kavnweng@gmail.com"
+```
+
+Or run: `bash dev-setup.sh`
 
 When developing a specific module (e.g., `nsa`), make sure to switch to the appropriate branch in both this repo and the `bento`` submodule.
 

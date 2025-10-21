@@ -77,12 +77,14 @@ multi_line_output = 3
 # Use prebuilt flash-attn wheel (saves ~10 min build time)
 flash-attn = { url = "https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.3.14/flash_attn-2.6.3%2Bcu124torch2.6-cp311-cp311-linux_x86_64.whl" }
 bento = { workspace = true, editable = true }
+lm-eval = { workspace = true, editable = true }
 torchtitan = { workspace = true, editable = true }
 
 [tool.uv.workspace]
 members = [
     "3rdparty/bento",
     "3rdparty/torchtitan",
+    "3rdparty/lm-evaluation-harness",
 ]
 
 [tool.poetry]
