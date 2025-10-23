@@ -168,19 +168,23 @@ class AutoencoderModel(AutoencoderPreTrainedModel):
         self.embeddings = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
         self.layers = nn.ModuleList([TransformerBlock(config, layer_idx) for layer_idx in range(config.num_hidden_layers)])
         self.norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)
+        # Derive sequence lengths for compress/upsample from masked_tokens consistently
+        m_tokens = int(getattr(config, "masked_tokens", 0) or 0)
+        m_tokens = max(m_tokens, 1)  # keep valid Linear shapes even if misconfigured
         self.compress = Compress(
             hidden_size=config.hidden_size,
             num_heads=config.num_heads,
-            seq_len=config.seq_len,
+            seq_len=m_tokens,
             compression_ratio=config.compression_ratio,
             compression_depth=config.compression_depth,
-            # Route init method from config; num_compressed defaults to ratio*seq_len
+            # Route init method from config
             init_method=getattr(config, "compress_init_method", "suffix"),
+            attention_bias=getattr(config, "attention_bias", False),
         )
         self.upsample = Upsample(
             hidden_size=config.hidden_size,
             num_heads=config.num_heads,
-            seq_len=int(config.seq_len * config.compression_ratio),
+            seq_len=int(m_tokens * config.compression_ratio),
             upsample_ratio=1.0 / config.compression_ratio,
             upsample_depth=config.upsample_depth
         )
@@ -232,7 +236,6 @@ class AutoencoderModel(AutoencoderPreTrainedModel):
         # embed positions
         hidden_states = inputs_embeds
         masked_tokens: int = self.config.masked_tokens
-        compression_tokens: int = self.config.compression_tokens
         compression_layer_idx: int = self.config.compression_layer_idx
 
         all_hidden_states = () if output_hidden_states else None
@@ -293,8 +296,8 @@ class AutoencoderModel(AutoencoderPreTrainedModel):
             if compression_layer_idx is not None and idx == compression_layer_idx and masked_tokens > 0:
                 bsz, seq_len, dim = hidden_states.size()
                 m = min(masked_tokens, seq_len)
-                # Derive compressed length from tokens if provided, otherwise from ratio
-                c = min((compression_tokens if compression_tokens > 0 else int(m * self.config.compression_ratio)), m)
+                # Derive compressed length consistently from ratio and masked_tokens
+                c = min(int(m * self.config.compression_ratio), m)
                 prefix = hidden_states[:, :m, :]
                 tail = hidden_states[:, m:, :]
                 compressed_prefix = self.compress(prefix, compression_ratio=self.config.compression_ratio)
@@ -377,7 +380,6 @@ class AutoencoderForCausalLM(AutoencoderPreTrainedModel, FLAGenerationMixin):
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         masked_tokens_for_loss = self.config.masked_tokens
-        compression_tokens_for_loss = self.config.compression_tokens
 
         outputs = self.model(
             input_ids=input_ids,
@@ -424,11 +426,8 @@ class AutoencoderForCausalLM(AutoencoderPreTrainedModel, FLAGenerationMixin):
             if masked_tokens_for_loss > 0:
                 # Align tail: predictions at indices [c:] correspond to labels at [m:]
                 m = masked_tokens_for_loss
-                # If explicit compression_tokens is provided and > 0, use it; otherwise derive from ratio
-                if compression_tokens_for_loss and compression_tokens_for_loss > 0:
-                    c = min(compression_tokens_for_loss, m)
-                else:
-                    c = min(int(m * self.config.compression_ratio), m)
+                # Always derive compressed-length from ratio and masked_tokens
+                c = min(int(m * self.config.compression_ratio), m)
                 hs_tail = hidden_states[:, c:, :]
                 labels_tail = labels[:, m:]
                 tail_len = min(hs_tail.size(1), labels_tail.size(1))

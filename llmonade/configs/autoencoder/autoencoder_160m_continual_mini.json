@@ -9,7 +9,7 @@
   "initializer_range": 0.02,
   "intermediate_size": 3072,
   "max_position_embeddings": 2048,
-  "model_type": "transformer_continual",
+  "model_type": "autoencoder_continual",
   "num_heads": 12,
   "num_kv_heads": 12,
   "num_hidden_layers": 12,
@@ -18,8 +18,12 @@
   "use_cache": true,
   "vocab_size": 50304,
   "torch_dtype": "bfloat16",
-  "masked_prefix": 8192,
-  "compression_prefix": 8192,
-  "compression_layer_idx": 0
+  "compression_ratio": 0.25,
+  "compress_init_method": "suffix",
+  "compression_depth": 6,
+  "upsample_depth": 1,
+  "seq_len": 8192,
+  "compression_layer_idx": 7,
+  "masked_tokens": 8192,
+  "compression_tokens": 2048
 }
-

@@ -168,18 +168,22 @@ class AutoencoderModel(AutoencoderPreTrainedModel):
         self.embeddings = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
         self.layers = nn.ModuleList([TransformerBlock(config, layer_idx) for layer_idx in range(config.num_hidden_layers)])
         self.norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)
+        # Derive sequence lengths from masked_tokens consistently
+        m_tokens = int(getattr(config, "masked_tokens", 0) or 0)
+        m_tokens = max(m_tokens, 1)
         self.compress = Compress(
             hidden_size=config.hidden_size,
             num_heads=config.num_heads,
-            seq_len=config.seq_len,
+            seq_len=m_tokens,
             compression_ratio=config.compression_ratio,
             compression_depth=config.compression_depth,
             init_method=getattr(config, "compress_init_method", "suffix"),
+            attention_bias=getattr(config, "attention_bias", False),
         )
         self.upsample = Upsample(
             hidden_size=config.hidden_size,
             num_heads=config.num_heads,
-            seq_len=int(config.seq_len * config.compression_ratio),
+            seq_len=int(m_tokens * config.compression_ratio),
             upsample_ratio=1.0 / config.compression_ratio,
             upsample_depth=config.upsample_depth
         )

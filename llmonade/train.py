@@ -261,10 +261,6 @@ def main(job_config: JobConfig):
         apply_qa_mask=job_config.training.apply_qa_mask,
         apply_hashhop_mask=job_config.training.apply_hashhop_mask,
         apply_digit_lookup_mask=job_config.training.apply_digit_lookup_mask,
-        ar_assist=job_config.training.ar_assist,
-        ar_chunk_len=job_config.training.ar_chunk_len,
-        current_step=0,  # initial step
-        ar_max_steps=job_config.training.ar_max_steps,
     )
 
     # Build synthetic dataloader if synthetic training is configured
@@ -309,10 +305,6 @@ def main(job_config: JobConfig):
                 apply_qa_mask=job_config.training.apply_qa_mask,
                 apply_hashhop_mask=job_config.training.apply_hashhop_mask,
                 apply_digit_lookup_mask=job_config.training.apply_digit_lookup_mask,
-                ar_assist=False,  # Typically don't apply AR to synthetic data
-                ar_chunk_len=job_config.training.ar_chunk_len,
-                current_step=0,
-                ar_max_steps=job_config.training.ar_max_steps,
             )
 
     logger.info(f"Loading model config from {job_config.model.config}")
@@ -844,15 +836,6 @@ def main(job_config: JobConfig):
     else:
         logger.info(f"{color.green}  Starting with MAIN dataset training")
     
-    # Log AR status
-    if job_config.training.ar_assist:
-        logger.info(
-            f"{color.green}  Associative Recall augmentation: ENABLED for first "
-            f"{job_config.training.ar_max_steps} steps (chunk_len={job_config.training.ar_chunk_len})"
-        )
-    else:
-        logger.info(f"{color.green}  Associative Recall augmentation: DISABLED")
-
     logger.info(
         f"{color.green}  Number of tokens per sequence = {job_config.training.seq_len:,}"
     )
@@ -890,49 +873,6 @@ def main(job_config: JobConfig):
             train_state.step += 1
             gc_handler.run(train_state.step)
             
-            # Check for disabling AR augmentation
-            if (
-                job_config.training.ar_assist
-                and train_state.step == job_config.training.ar_max_steps
-                and hasattr(dataloader.dataset, 'ar_assist')
-                and dataloader.dataset.ar_assist
-            ):
-                logger.info(f"{color.red}***** Disabling AR augmentation at step {train_state.step} *****{color.reset}")
-                
-                # Save checkpoint before transition
-                checkpoint.save(train_state.step, force=True)
-                
-                # Recreate main dataloader with AR disabled
-                dataloader = build_dataloader(
-                    dataset=dataset,
-                    tokenizer=tokenizer,
-                    rank=dp_rank,
-                    world_size=dp_degree,
-                    batch_size=job_config.training.batch_size,
-                    seq_len=job_config.training.seq_len,
-                    context_len=job_config.training.context_len,
-                    varlen=job_config.training.varlen,
-                    num_workers=job_config.training.num_workers,
-                    pin_memory=True,
-                    prefetch_factor=job_config.training.prefetch_factor,
-                    persistent_workers=job_config.training.persistent_workers,
-                    apply_qa_mask=job_config.training.apply_qa_mask,
-                    apply_hashhop_mask=job_config.training.apply_hashhop_mask,
-                    apply_digit_lookup_mask=job_config.training.apply_digit_lookup_mask,
-                    ar_assist=False,  # Disable AR
-                    ar_chunk_len=job_config.training.ar_chunk_len,
-                    current_step=train_state.step,
-                    ar_max_steps=job_config.training.ar_max_steps,
-                )
-                
-                # Create new iterator
-                main_data_iterator = iter(dataloader)
-                
-                # Update checkpoint's dataloader reference
-                checkpoint.dataloader = dataloader
-                
-                logger.info(f"{color.green}AR augmentation disabled successfully{color.reset}")
-
             # Check for entering synthetic phase
             if (
                 synthetic_dataloader is not None

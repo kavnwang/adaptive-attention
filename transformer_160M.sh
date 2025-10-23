@@ -46,15 +46,14 @@ torchrun --nproc_per_node=1 --nnodes=1 -m llmonade.train \
   --lr_scheduler.lr_min 0.1 \
   --lr_scheduler.decay_type cosine \
   --training.batch_size 4 \
-  --training.seq_len 16384 \
+  --training.seq_len 8192 \
   --training.gradient_accumulation_steps 1 \
-  --training.steps 20000 \
+  --training.steps 10000 \
   --training.max_norm 1.0 \
   --training.skip_nan_inf \
-  --training.dataset HuggingFaceFW/fineweb-edu \
+  --training.dataset manu/project_gutenberg \
   --training.streaming \
-  --training.dataset_name sample-10BT \
-  --training.dataset_split train \
+  --training.dataset_split en \
   --training.mixed_precision_param bfloat16 \
   --training.num_workers 8 \
   --training.prefetch_factor 2 \

@@ -37,7 +37,7 @@ class Compress(nn.Module):
         self,
         hidden_size: int = 2048,
         num_heads: int = 32,
-        compression_ratio: float = 0.5,
+        compression_ratio: float = 0.0625,
         compression_depth: int = 2,
         seq_len: int = 8192,
         init_method: str = "suffix",
@@ -47,7 +47,8 @@ class Compress(nn.Module):
         window_size: Optional[int] = None,
         rope_theta: Optional[float] = 10000.,
         max_position_embeddings: Optional[int] = None,
-        layer_idx: int = None
+        layer_idx: int = None,
+        attention_bias: bool = False,
     ):
         super().__init__()
 
@@ -67,11 +68,15 @@ class Compress(nn.Module):
         self.compression_ratio = compression_ratio
         self.compression_depth = compression_depth
         self.seq_len = seq_len
+        # Pre-compute expected compressed and key lengths from config
+        self.compressed_len = int(self.seq_len * self.compression_ratio)
+        self.keys_len = self.seq_len + self.compressed_len
         self.window_size = window_size
         self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
         self.layer_idx = layer_idx
         self.init_method = init_method
+        self.use_attn_bias = attention_bias
 
         if flash_attn_func is None:
             raise ImportError("Please install Flash Attention via `pip install flash-attn --no-build-isolation` first")
@@ -92,6 +97,15 @@ class Compress(nn.Module):
         self.rotary = RotaryEmbedding(dim=head_dim, base=rope_theta)
         #self.compression = nn.Linear(seq_len, int(seq_len * compression_ratio))
         self.mlp = GatedMLP(hidden_size)
+
+        # Optional key-side (sink) attention bias per head: [H, L+C]
+        # This biases certain key positions for every query.
+        if self.use_attn_bias:
+            self.max_keys_len = self.keys_len
+            self.sink_bias_keys = nn.Parameter(torch.zeros(self.num_heads, self.max_keys_len))
+        else:
+            self.max_keys_len = None
+            self.sink_bias_keys = None
 
     def init_compressed_tokens_mlp(
         self,
@@ -133,9 +147,43 @@ class Compress(nn.Module):
             compressed_tokens = self.init_compressed_tokens_mlp(hidden_states)
         
         for _ in range(self.compression_depth):
+            # Build residual and sizes
             residual = torch.cat([hidden_states, compressed_tokens], dim=-2)
+            L = hidden_states.shape[1]
+            C = compressed_tokens.shape[1]
+            K = residual.shape[1]  # L + C
+
+            # 1) Update original hidden states with FlashAttention (causal within original segment)
+            if L > 0:
+                orig = self.attn_norm(hidden_states)
+                q_o = rearrange(self.q_proj(orig), "... (h d) -> ... h d", d=self.head_dim)
+                k_o = rearrange(self.k_proj(orig), "... (h d) -> ... h d", d=self.head_dim)
+                v_o = rearrange(self.v_proj(orig), "... (h d) -> ... h d", d=self.head_dim)
+                if self.num_kv_groups != 1:
+                    k_o = k_o.repeat_interleave(self.num_kv_groups, dim=-2)
+                    v_o = v_o.repeat_interleave(self.num_kv_groups, dim=-2)
+                if self.qk_norm:
+                    q_o = self.q_norm(q_o)
+                    k_o = self.k_norm(k_o)
+                # RoPE for original tokens: positions [0..L-1]
+                q_o, k_o = self.rotary(q_o, k_o, seqlen_offset=0, max_seqlen=L)
+                o = flash_attn_func(
+                    q_o, k_o, v_o,
+                    causal=True,
+                    window_size=(-1, -1) if self.window_size is None else (self.window_size-1, 0)
+                )
+                o = o.reshape(orig.shape[0], L, -1)
+                out_o = self.o_proj(o)
+                hidden_states = hidden_states + out_o
+                # MLP on original tokens
+                tmp = self.mlp_norm(hidden_states)
+                hidden_states = hidden_states + self.mlp(tmp)
+
+            # 2) Update compressed tokens with FlashAttention over residual (keys length K, queries length C)
             compressed_tokens = self.attn_norm(compressed_tokens)
             q = rearrange(self.q_proj(compressed_tokens), "... (h d) -> ... h d", d=self.head_dim)
+            # Rebuild residual after original update
+            residual = torch.cat([hidden_states, compressed_tokens], dim=-2)
             k = rearrange(self.k_proj(residual), "... (h d) -> ... h d", d=self.head_dim)
             v = rearrange(self.v_proj(residual), "... (h d) -> ... h d", d=self.head_dim)
             if self.num_kv_groups != 1:
@@ -144,17 +192,18 @@ class Compress(nn.Module):
             if self.qk_norm:
                 q = self.q_norm(q)
                 k = self.k_norm(k)
-
-            qk_similarities = torch.einsum("bsnk,btnk->bsnt", q, k)
-            qk_similarities = qk_similarities / (self.head_dim ** 0.5)
-            attn_scores = torch.softmax(qk_similarities, dim=-1)
-            o = torch.einsum("bsnt,btnk->bsnk", attn_scores, v)
-            o = o.reshape(batch_size, o.shape[1], -1)
+            # RoPE with distinct offsets for queries and keys
+            q, _ = self.rotary(q, q, seqlen_offset=L, max_seqlen=K)
+            _, k = self.rotary(k, k, seqlen_offset=0, max_seqlen=K)
+            o = flash_attn_func(
+                q, k, v,
+                causal=True,
+                window_size=(-1, -1) if self.window_size is None else (self.window_size-1, 0)
+            )
+            o = o.reshape(batch_size, C, -1)
             output = self.o_proj(o)
-            compressed_tokens = output + compressed_tokens
+            compressed_tokens = compressed_tokens + output
             compressed_tokens = self.mlp_norm(compressed_tokens)
             output = self.mlp(compressed_tokens)
-            compressed_tokens = output + compressed_tokens
+            compressed_tokens = compressed_tokens + output
         return compressed_tokens
-
-

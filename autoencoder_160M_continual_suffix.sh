@@ -51,7 +51,7 @@ torchrun --nproc_per_node=1 --nnodes=1 -m llmonade.train \
   --training.batch_size 8 \
   --training.seq_len 16384 \
   --training.gradient_accumulation_steps 1 \
-  --training.steps 20000 \
+  --training.steps 10000 \
   --training.max_norm 1.0 \
   --training.skip_nan_inf \
   --training.dataset manu/project_gutenberg \

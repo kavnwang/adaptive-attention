@@ -12,8 +12,8 @@ ts() { date +"%Y-%m-%d %H:%M:%S"; }
 echo "[$(ts)] Running autoencoder_160M_continual_suffix.sh..."
 bash ./autoencoder_160M_continual_suffix.sh
 
-echo "[$(ts)] Running autoencoder_160M_continual.sh..."
-bash ./autoencoder_160M_continual.sh
+echo "[$(ts)] Running transformer_160M.sh..."
+bash ./transformer_160M.sh
 
 echo "[$(ts)] Running transformer_160M_continual.sh..."
 bash ./transformer_160M_continual.sh

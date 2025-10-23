@@ -64,7 +64,6 @@ class AutoencoderContinualForCausalLM(AutoencoderContinualPreTrainedModel, BaseF
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         masked_tokens_for_loss = int(getattr(self.config, "masked_tokens", 0) or 0)
-        compression_tokens_for_loss = int(getattr(self.config, "compression_tokens", 0) or 0)
 
         outputs = self.model(
             input_ids=input_ids,
@@ -108,21 +107,36 @@ class AutoencoderContinualForCausalLM(AutoencoderContinualPreTrainedModel, BaseF
             labels = labels.to(hidden_states.device)
             # Shift left by 1 for next-token prediction
             labels = torch.cat((labels[..., 1:], torch.full_like(labels[:, :1], criterion.ignore_index)), 1)
+            # Build a label mask from attention_mask and apply it (0 -> ignore)
+            if attention_mask is not None:
+                label_mask_all = torch.cat(
+                    (attention_mask[:, 1:], torch.zeros_like(attention_mask[:, :1])),
+                    dim=1,
+                )
+            else:
+                label_mask_all = None
 
             # Determine which part to supervise and align labels/predictions
             seq_len_out = hidden_states.size(1)
             if masked_tokens_for_loss > 0:
                 m = masked_tokens_for_loss
-                c = min(compression_tokens_for_loss, m)
+                # Derive compressed length consistently from ratio and masked_tokens
+                c = min(int(m * getattr(self.config, "compression_ratio", 0.0)), m)
                 hs_tail = hidden_states[:, c:, :]
                 labels_tail = labels[:, m:]
                 tail_len = min(hs_tail.size(1), labels_tail.size(1))
                 hs_for_loss = hs_tail[:, :tail_len, :]
                 labels_for_loss = labels_tail[:, :tail_len]
+                if label_mask_all is not None:
+                    mask_tail = label_mask_all[:, m:][:, :tail_len]
+                    labels_for_loss = labels_for_loss.masked_fill(mask_tail == 0, criterion.ignore_index)
             else:
                 keep_len = min(seq_len_out, labels.size(1))
                 hs_for_loss = hidden_states[:, :keep_len, :]
                 labels_for_loss = labels[:, :keep_len]
+                if label_mask_all is not None:
+                    mask_head = label_mask_all[:, :keep_len]
+                    labels_for_loss = labels_for_loss.masked_fill(mask_head == 0, criterion.ignore_index)
 
             if getattr(self.config, "fuse_linear_cross_entropy", False):
                 loss = criterion(hs_for_loss, labels_for_loss, self.lm_head.weight, self.lm_head.bias)
@@ -316,19 +330,21 @@ class AutoencoderModel(AutoencoderPreTrainedModel):
         self.embeddings = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
         self.layers = nn.ModuleList([TransformerBlock(config, layer_idx) for layer_idx in range(config.num_hidden_layers)])
         self.norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)
+        # Use masked_tokens to derive seq_len consistently, avoiding config.seq_len/compression_tokens
+        m_tokens = int(getattr(config, "masked_tokens", 0) or 0)
+        m_tokens = max(m_tokens, 1)
         self.compress = Compress(
             hidden_size=config.hidden_size,
             num_heads=config.num_heads,
-            seq_len=config.seq_len,
+            seq_len=m_tokens,
             compression_ratio=config.compression_ratio,
             compression_depth=config.compression_depth,
-            num_compressed=(config.compression_tokens if getattr(config, "compression_tokens", 0) else None),
             init_method=getattr(config, "compress_init_method", "suffix"),
         )
         self.upsample = Upsample(
             hidden_size=config.hidden_size,
             num_heads=config.num_heads,
-            seq_len=int(config.seq_len * config.compression_ratio),
+            seq_len=int(m_tokens * config.compression_ratio),
             upsample_ratio=1.0 / config.compression_ratio,
             upsample_depth=config.upsample_depth
         )
@@ -380,7 +396,6 @@ class AutoencoderModel(AutoencoderPreTrainedModel):
         # embed positions
         hidden_states = inputs_embeds
         masked_tokens: int = self.config.masked_tokens
-        compression_tokens: int = self.config.compression_tokens
         compression_layer_idx: int = self.config.compression_layer_idx
 
         all_hidden_states = () if output_hidden_states else None
@@ -441,16 +456,17 @@ class AutoencoderModel(AutoencoderPreTrainedModel):
             if compression_layer_idx is not None and idx == compression_layer_idx and masked_tokens > 0:
                 bsz, seq_len, dim = hidden_states.size()
                 m = min(masked_tokens, seq_len)
-                c = min(compression_tokens, m)
+                # Derive compressed length from ratio and masked_tokens
+                c = min(int(m * self.config.compression_ratio), m)
                 prefix = hidden_states[:, :m, :]
                 tail = hidden_states[:, m:, :]
-                compressed_prefix = self.compress(prefix)
+                compressed_prefix = self.compress(prefix, compression_ratio=self.config.compression_ratio)
                 hidden_states = torch.cat([compressed_prefix, tail], dim=1)
 
         hidden_states = self.norm(hidden_states)
         if compression_layer_idx is None:
             inputs = hidden_states
-            hidden_states = self.compress(hidden_states)
+            hidden_states = self.compress(hidden_states, compression_ratio=self.config.compression_ratio)
             hidden_states = self.upsample(hidden_states)
             hidden_states = self.norm(hidden_states)
         else:
@@ -524,7 +540,6 @@ class AutoencoderForCausalLM(AutoencoderPreTrainedModel, FLAGenerationMixin):
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         masked_tokens_for_loss = self.config.masked_tokens
-        compression_tokens_for_loss = self.config.compression_tokens
 
         outputs = self.model(
             input_ids=input_ids,
@@ -571,7 +586,7 @@ class AutoencoderForCausalLM(AutoencoderPreTrainedModel, FLAGenerationMixin):
             if masked_tokens_for_loss > 0:
                 # Align tail: predictions at indices [c:] correspond to labels at [m:]
                 m = masked_tokens_for_loss
-                c = min(compression_tokens_for_loss, m)
+                c = min(int(m * self.config.compression_ratio), m)
                 hs_tail = hidden_states[:, c:, :]
                 labels_tail = labels[:, m:]
                 tail_len = min(hs_tail.size(1), labels_tail.size(1))

@@ -18,8 +18,8 @@
   "use_cache": true,
   "vocab_size": 50304,
   "torch_dtype": "bfloat16",
-  "masked_prefix": 4096,
-  "compression_prefix": 512,
-  "compression_layer_idx": 6
+  "masked_prefix": 8192,
+  "compression_prefix": 2048,
+  "compression_layer_idx": 7
 }
 

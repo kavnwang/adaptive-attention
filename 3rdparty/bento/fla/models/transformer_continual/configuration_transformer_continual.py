@@ -40,8 +40,8 @@ class TransformerContinualConfig(PretrainedConfig):
         use_l2warp: bool = False,
         compression_layer_idx: int = 6,
         masked_prefix: int = 8192,
-        compression_prefix: int = 512,
-        vocab_size: int = 32000,
+        compression_prefix: int = 2048,
+        vocab_size: int = 50304,
         **kwargs,
     ):
         self.hidden_size = hidden_size

@@ -349,14 +349,29 @@ class TransformerContinualForCausalLM(TransformerContinualPreTrainedModel, FLAGe
             else:
                 criterion = self.criterion
             labels = labels.to(hidden_states.device)
+            # Align labels and attention mask with any upstream truncation
             drop_len = max(0, masked_prefix - compression_prefix)
             if drop_len > 0:
                 labels = labels[:, drop_len:]
+                if attention_mask is not None:
+                    attention_mask = attention_mask[:, drop_len:]
+            # Shift labels left by 1 for next-token prediction
             labels = torch.cat((labels[..., 1:], torch.full_like(labels[:, :1], criterion.ignore_index)), 1)
+            # Build a label mask from attention_mask and apply it (0 -> ignore)
+            if attention_mask is not None:
+                label_mask = torch.cat(
+                    (attention_mask[:, 1:], torch.zeros_like(attention_mask[:, :1])),
+                    dim=1,
+                )
+            else:
+                label_mask = None
 
             if keep_len > 0:
                 hs_tail = hidden_states[:, -keep_len:, :]
                 labels_tail = labels[:, -keep_len:]
+                if label_mask is not None:
+                    mask_tail = label_mask[:, -keep_len:]
+                    labels_tail = labels_tail.masked_fill(mask_tail == 0, criterion.ignore_index)
                 if getattr(self.config, 'fuse_linear_cross_entropy', False):
                     loss = criterion(hs_tail, labels_tail, self.lm_head.weight, self.lm_head.bias)
                 else:
