@@ -40,9 +40,6 @@ class TransformerBlock(GradientCheckpointingLayer):
 
         self.config = config
         self.layer_idx = layer_idx
-        self.compression_layer_idx = getattr(config, 'compression_layer_idx', 0)
-        self.masked_prefix = int(getattr(config, 'masked_prefix', 0) or 0)
-        self.compression_prefix = int(getattr(config, 'compression_prefix', 0) or 0)
 
         self.attn_norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)
         self.attn = Attention(
@@ -78,17 +75,6 @@ class TransformerBlock(GradientCheckpointingLayer):
 
         residual = hidden_states
         hidden_states = self.attn_norm(hidden_states)
-        # Apply early-layer masking only to the compression_prefix chunk remaining after truncation.
-        # We assume the first (masked_prefix - compression_prefix) tokens have been truncated upstream.
-        if self.layer_idx < self.compression_layer_idx and self.compression_prefix > 0:
-            seq_len = hidden_states.size(1)
-            comp_mask = min(self.compression_prefix, seq_len)
-            if comp_mask > 0:
-                if attention_mask is None:
-                    attention_mask = torch.ones((hidden_states.size(0), seq_len), dtype=torch.bool, device=hidden_states.device)
-                else:
-                    attention_mask = attention_mask.clone()
-                attention_mask[:, :comp_mask] = 0
         hidden_states, attentions, past_key_values = self.attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
@@ -222,16 +208,6 @@ class TransformerModel(TransformerPreTrainedModel):
         if use_cache and not isinstance(past_key_values, Cache):
             past_key_values = Cache.from_legacy_cache(past_key_values)
 
-        # Truncate the first (masked_prefix - compression_prefix) tokens globally at model input
-        drop_len = max(0, int(getattr(self.config, 'masked_prefix', 0) or 0) - int(getattr(self.config, 'compression_prefix', 0) or 0))
-        if drop_len > 0:
-            if input_ids is not None:
-                input_ids = input_ids[:, drop_len:]
-            if inputs_embeds is not None:
-                inputs_embeds = inputs_embeds[:, drop_len:, :]
-            if attention_mask is not None:
-                attention_mask = attention_mask[:, drop_len:]
-
         if inputs_embeds is None:
             inputs_embeds = self.embeddings(input_ids)
 
@@ -362,19 +338,7 @@ class TransformerForCausalLM(TransformerPreTrainedModel, FLAGenerationMixin):
                 criterion = self.criterion
             # Enable model parallelism
             labels = labels.to(hidden_states.device)
-            # Truncate labels the same way inputs were truncated
-            masked_prefix = int(getattr(self.config, 'masked_prefix', 0) or 0)
-            compression_prefix = int(getattr(self.config, 'compression_prefix', 0) or 0)
-            drop_len = max(0, masked_prefix - compression_prefix)
-            if drop_len > 0:
-                labels = labels[:, drop_len:]
-            # Shift labels left by 1
             labels = torch.cat((labels[..., 1:], torch.full_like(labels[:, :1], criterion.ignore_index)), 1)
-            # Ignore the compression_prefix tokens from loss (the initial chunk of the truncated sequence)
-            if compression_prefix > 1:
-                ignore_count = min(compression_prefix - 1, labels.size(1))
-                if ignore_count > 0:
-                    labels[:, :ignore_count] = criterion.ignore_index
             if self.config.fuse_linear_cross_entropy:
                 loss = criterion(hidden_states, labels, self.lm_head.weight, self.lm_head.bias)
             else:
