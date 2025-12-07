@@ -16,9 +16,7 @@ from fla.models.autoencoder.modeling_autoencoder import (
     AutoencoderModel as BaseModel,
     AutoencoderForCausalLM as BaseForCausalLM,
 )
-from fla.models.autoencoder_predictor.configuration_autoencoder_continual import (
-    AutoencoderPredictorConfig,
-)
+from fla.models.autoencoder_predictor.configuration_joyce import AutoencoderPredictorConfig
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
@@ -30,7 +28,7 @@ class AutoencoderPredictorPreTrainedModel(BasePreTrained):
 
 class AutoencoderPredictorModel(AutoencoderPredictorPreTrainedModel, BaseModel):
     """
-    Thin wrapper so training can use model_type="autoencoder_continual"
+    Thin wrapper so training can use model_type="joyce"
     while reusing the base autoencoder implementation.
     """
 

@@ -42,10 +42,10 @@ from fla.models.transformer_continual import (
     TransformerContinualForCausalLM,
     TransformerContinualModel,
 )
-from fla.models.autoencoder_continual import (
-    AutoencoderContinualConfig,
-    AutoencoderContinualForCausalLM,
-    AutoencoderContinualModel,
+from fla.models.joyce import (
+    JoyceConfig,
+    JoyceForCausalLM,
+    JoyceModel,
 )
 
 # Ensure predictor variant is imported so AutoConfig registry is populated
@@ -86,6 +86,6 @@ __all__ = [
     'SambaConfig', 'SambaForCausalLM', 'SambaModel',
     'TransformerConfig', 'TransformerForCausalLM', 'TransformerModel',
     'TransformerContinualConfig', 'TransformerContinualForCausalLM', 'TransformerContinualModel',
-    'AutoencoderContinualConfig', 'AutoencoderContinualForCausalLM', 'AutoencoderContinualModel',
+    'JoyceConfig', 'JoyceForCausalLM', 'JoyceModel',
     'AutoencoderPredictorConfig', 'AutoencoderPredictorForCausalLM', 'AutoencoderPredictorModel',
 ]

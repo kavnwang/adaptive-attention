@@ -3,10 +3,10 @@
 from transformers import AutoConfig, AutoModel, AutoModelForCausalLM
 
 # Use the predictor variant (this module) rather than continual
-from fla.models.autoencoder_predictor.configuration_autoencoder_continual import (
+from fla.models.autoencoder_predictor.configuration_joyce import (
     AutoencoderPredictorConfig,
 )
-from fla.models.autoencoder_predictor.modeling_autoencoder_continual import (
+from fla.models.autoencoder_predictor.modeling_joyce import (
     AutoencoderModel as AutoencoderPredictorModelImpl,
     AutoencoderForCausalLM as AutoencoderPredictorForCausalLMImpl,
 )

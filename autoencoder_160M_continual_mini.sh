@@ -16,7 +16,7 @@ else
 fi
 
 # Create necessary directories
-mkdir -p exp/autoencoder_continual_160M_mini
+mkdir -p exp/joyce_160M_mini
 mkdir -p logs
 
 # Set environment variables
@@ -38,7 +38,7 @@ echo "Starting AE continual training - logging to $LOGFILE"
 
 torchrun --nproc_per_node=1 --nnodes=1 -m llmonade.train \
   --job.config_file llmonade/configs/llmon.toml \
-  --job.dump_folder exp/autoencoder_continual_160M_mini \
+  --job.dump_folder exp/joyce_160M_mini \
   --model.config llmonade/configs/autoencoder/autoencoder_160m_continual_mini.json \
   --model.tokenizer_path EleutherAI/pythia-160m \
   --optimizer.name AdamW \

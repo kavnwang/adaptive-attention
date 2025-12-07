@@ -5,8 +5,8 @@ from typing import Optional
 from fla.models.autoencoder.configuration_autoencoder import AutoencoderConfig
 
 
-class AutoencoderContinualConfig(AutoencoderConfig):
-    model_type = "autoencoder_continual"
+class JoyceConfig(AutoencoderConfig):
+    model_type = "joyce"
 
     def __init__(
         self,

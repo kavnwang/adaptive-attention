@@ -207,8 +207,8 @@ class TransformerContinualModel(TransformerContinualPreTrainedModel):
         if use_cache and not isinstance(past_key_values, Cache):
             past_key_values = Cache.from_legacy_cache(past_key_values)
 
-        masked_prefix = int(getattr(self.config, 'masked_prefix', 0) or 0)
-        compression_prefix = int(getattr(self.config, 'compression_prefix', 0) or 0)
+        masked_prefix = self.config.masked_prefix
+        compression_prefix = self.config.compression_prefix
         drop_len = max(0, masked_prefix - compression_prefix)
         if drop_len > 0:
             if input_ids is not None:

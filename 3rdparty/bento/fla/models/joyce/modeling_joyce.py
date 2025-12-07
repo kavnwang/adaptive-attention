@@ -4,169 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, List, Optional, Tuple, Union
 
-import torch
-import torch.nn as nn
-from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
-from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
-from fla.modules.l2warp import l2_warp
-from transformers.utils.deprecation import deprecate_kwarg
-
-from fla.models.autoencoder.modeling_autoencoder import (
-    AutoencoderPreTrainedModel as BasePreTrained,
-    AutoencoderModel as BaseModel,
-    AutoencoderForCausalLM as BaseForCausalLM,
-)
-from fla.models.autoencoder_continual.configuration_autoencoder_continual import (
-    AutoencoderContinualConfig,
-)
-
-if TYPE_CHECKING:
-    from transformers.processing_utils import Unpack
-
-
-class AutoencoderContinualPreTrainedModel(BasePreTrained):
-    config_class = AutoencoderContinualConfig
-
-
-class AutoencoderContinualModel(AutoencoderContinualPreTrainedModel, BaseModel):
-    """
-    Thin wrapper so training can use model_type="autoencoder_continual"
-    while reusing the base autoencoder implementation.
-    """
-
-    def __init__(self, config: AutoencoderContinualConfig) -> "AutoencoderContinualModel":
-        super().__init__(config)
-
-
-class AutoencoderContinualForCausalLM(AutoencoderContinualPreTrainedModel, BaseForCausalLM):
-    def __init__(self, config: AutoencoderContinualConfig):
-        super().__init__(config)
-
-    @deprecate_kwarg("num_logits_to_keep", version="4.50", new_name="logits_to_keep")
-    def forward(
-        self,
-        input_ids: torch.LongTensor = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        past_key_values: Optional[List[torch.FloatTensor]] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        labels: Optional[torch.LongTensor] = None,
-        use_cache: Optional[bool] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
-        logits_to_keep: Optional[int] = 0,
-        **kwargs: Unpack[Any]
-    ) -> Union[Tuple, CausalLMOutputWithPast]:
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-
-        masked_tokens_for_loss = int(getattr(self.config, "masked_tokens", 0) or 0)
-
-        outputs = self.model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            past_key_values=past_key_values,
-            inputs_embeds=inputs_embeds,
-            use_cache=use_cache,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
-            **kwargs,
-        )
-
-        model_outputs = outputs
-        ae_inputs = None
-        if isinstance(outputs, tuple) and len(outputs) == 2:
-            ae_inputs, model_outputs = outputs
-
-        hidden_states = (
-            model_outputs.last_hidden_state if return_dict and hasattr(model_outputs, "last_hidden_state") else outputs[0]
-        )
-
-        # Optional logits for last-k; not used for loss
-        logits = None if getattr(self.config, "fuse_linear_cross_entropy", False) else self.lm_head(
-            hidden_states[:, -logits_to_keep:]
-        )
-
-        loss = None
-        if labels is not None:
-            # Build criterion
-            if getattr(self, "criterion", None) is None:
-                if getattr(self.config, "fuse_linear_cross_entropy", False):
-                    criterion = FusedLinearCrossEntropyLoss(use_l2warp=getattr(self.config, "use_l2warp", False))
-                elif getattr(self.config, "fuse_cross_entropy", False):
-                    criterion = FusedCrossEntropyLoss(inplace_backward=True)
-                else:
-                    criterion = nn.CrossEntropyLoss()
-            else:
-                criterion = self.criterion
-
-            labels = labels.to(hidden_states.device)
-            # Shift left by 1 for next-token prediction
-            labels = torch.cat((labels[..., 1:], torch.full_like(labels[:, :1], criterion.ignore_index)), 1)
-            # Build a label mask from attention_mask and apply it (0 -> ignore)
-            if attention_mask is not None:
-                label_mask_all = torch.cat(
-                    (attention_mask[:, 1:], torch.zeros_like(attention_mask[:, :1])),
-                    dim=1,
-                )
-            else:
-                label_mask_all = None
-
-            # Determine which part to supervise and align labels/predictions
-            seq_len_out = hidden_states.size(1)
-            if masked_tokens_for_loss > 0:
-                m = masked_tokens_for_loss
-                # Derive compressed length consistently from ratio and masked_tokens
-                c = min(int(m * getattr(self.config, "compression_ratio", 0.0)), m)
-                hs_tail = hidden_states[:, c:, :]
-                labels_tail = labels[:, m:]
-                tail_len = min(hs_tail.size(1), labels_tail.size(1))
-                hs_for_loss = hs_tail[:, :tail_len, :]
-                labels_for_loss = labels_tail[:, :tail_len]
-                if label_mask_all is not None:
-                    mask_tail = label_mask_all[:, m:][:, :tail_len]
-                    labels_for_loss = labels_for_loss.masked_fill(mask_tail == 0, criterion.ignore_index)
-            else:
-                keep_len = min(seq_len_out, labels.size(1))
-                hs_for_loss = hidden_states[:, :keep_len, :]
-                labels_for_loss = labels[:, :keep_len]
-                if label_mask_all is not None:
-                    mask_head = label_mask_all[:, :keep_len]
-                    labels_for_loss = labels_for_loss.masked_fill(mask_head == 0, criterion.ignore_index)
-
-            if getattr(self.config, "fuse_linear_cross_entropy", False):
-                loss = criterion(hs_for_loss, labels_for_loss, self.lm_head.weight, self.lm_head.bias)
-            else:
-                logits_for_loss = self.lm_head(hs_for_loss)
-                loss = criterion(
-                    logits_for_loss.contiguous().view(-1, logits_for_loss.size(-1)),
-                    labels_for_loss.contiguous().view(-1),
-                )
-                loss = l2_warp(loss, logits_for_loss) if getattr(self.config, "use_l2warp", False) else loss
-
-        if not return_dict:
-            output = (logits,) + outputs[1:]
-            return (loss,) + output if loss is not None else output
-
-        return CausalLMOutputWithPast(
-            loss=loss,
-            logits=logits,
-            past_key_values=model_outputs.past_key_values if hasattr(model_outputs, "past_key_values") else None,
-            hidden_states=model_outputs.hidden_states if hasattr(model_outputs, "hidden_states") else None,
-            attentions=model_outputs.attentions if hasattr(model_outputs, "attentions") else None,
-        )
-
-# -*- coding: utf-8 -*-
-
-
-
 import math
 import warnings
-from typing import TYPE_CHECKING, Any, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -178,7 +17,7 @@ from transformers.utils.deprecation import deprecate_kwarg
 from fla.layers.attn import Attention
 from fla.layers.compress import Compress
 from fla.layers.upsample import Upsample
-from fla.models.autoencoder.configuration_autoencoder import AutoencoderConfig
+from fla.models.joyce.configuration_joyce import JoyceConfig
 from fla.models.utils import Cache, FLAGenerationMixin
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
 from fla.modules import GatedMLP as TransformerMLP
@@ -199,7 +38,7 @@ logger = logging.get_logger(__name__)
 
 class TransformerBlock(GradientCheckpointingLayer):
 
-    def __init__(self, config: AutoencoderConfig, layer_idx: int):
+    def __init__(self, config: JoyceConfig, layer_idx: int):
         super().__init__()
 
         self.config = config
@@ -267,9 +106,9 @@ class TransformerBlock(GradientCheckpointingLayer):
         return outputs
 
 
-class AutoencoderPreTrainedModel(PreTrainedModel):
+class JoycePreTrainedModel(PreTrainedModel):
 
-    config_class = AutoencoderConfig
+    config_class = JoyceConfig
     base_model_prefix = 'model'
     supports_gradient_checkpointing = True
     _no_split_modules = ['TransformerBlock']
@@ -317,12 +156,12 @@ class AutoencoderPreTrainedModel(PreTrainedModel):
                     p /= math.sqrt(num_residuals_per_layer * self.config.num_hidden_layers)
 
 
-class AutoencoderModel(AutoencoderPreTrainedModel):
+class JoyceModel(JoycePreTrainedModel):
 
     def __init__(
         self,
-        config: AutoencoderConfig
-    ) -> AutoencoderModel:
+        config: JoyceConfig
+    ) -> JoyceModel:
         super().__init__(config)
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
@@ -330,13 +169,11 @@ class AutoencoderModel(AutoencoderPreTrainedModel):
         self.embeddings = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
         self.layers = nn.ModuleList([TransformerBlock(config, layer_idx) for layer_idx in range(config.num_hidden_layers)])
         self.norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)
-        # Use masked_tokens to derive seq_len consistently, avoiding config.seq_len/compression_tokens
-        m_tokens = int(getattr(config, "masked_tokens", 0) or 0)
-        m_tokens = max(m_tokens, 1)
+        masked_tokens = self.config.masked_tokens
         self.compress = Compress(
             hidden_size=config.hidden_size,
             num_heads=config.num_heads,
-            seq_len=m_tokens,
+            seq_len=masked_tokens,
             compression_ratio=config.compression_ratio,
             compression_depth=config.compression_depth,
             init_method=getattr(config, "compress_init_method", "suffix"),
@@ -344,7 +181,7 @@ class AutoencoderModel(AutoencoderPreTrainedModel):
         self.upsample = Upsample(
             hidden_size=config.hidden_size,
             num_heads=config.num_heads,
-            seq_len=int(m_tokens * config.compression_ratio),
+            seq_len=int(masked_tokens * config.compression_ratio),
             upsample_ratio=1.0 / config.compression_ratio,
             upsample_depth=config.upsample_depth
         )
@@ -393,7 +230,6 @@ class AutoencoderModel(AutoencoderPreTrainedModel):
         if inputs_embeds is None:
             inputs_embeds = self.embeddings(input_ids)
 
-        # embed positions
         hidden_states = inputs_embeds
         masked_tokens: int = self.config.masked_tokens
         compression_layer_idx: int = self.config.compression_layer_idx
@@ -402,13 +238,12 @@ class AutoencoderModel(AutoencoderPreTrainedModel):
         all_attns = () if output_attentions else None
         next_cache = None
 
-
         for idx, layer in enumerate(self.layers):
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
             if (compression_layer_idx is not None) and (idx <= compression_layer_idx) and (masked_tokens > 0):
-                bsz, seq_len, _ = hidden_states.size()
+                seq_len = hidden_states.size(1)
                 m = min(masked_tokens, seq_len)
                 prefix = hidden_states[:, :m, :]
                 tail = hidden_states[:, m:, :]
@@ -454,23 +289,14 @@ class AutoencoderModel(AutoencoderPreTrainedModel):
                 if output_attentions:
                     all_attns += (layer_outputs[1],)
             if compression_layer_idx is not None and idx == compression_layer_idx and masked_tokens > 0:
-                bsz, seq_len, dim = hidden_states.size()
+                seq_len = hidden_states.size(1)
                 m = min(masked_tokens, seq_len)
-                # Derive compressed length from ratio and masked_tokens
-                c = min(int(m * self.config.compression_ratio), m)
                 prefix = hidden_states[:, :m, :]
                 tail = hidden_states[:, m:, :]
                 compressed_prefix = self.compress(prefix, compression_ratio=self.config.compression_ratio)
                 hidden_states = torch.cat([compressed_prefix, tail], dim=1)
 
         hidden_states = self.norm(hidden_states)
-        if compression_layer_idx is None:
-            inputs = hidden_states
-            hidden_states = self.compress(hidden_states, compression_ratio=self.config.compression_ratio)
-            hidden_states = self.upsample(hidden_states)
-            hidden_states = self.norm(hidden_states)
-        else:
-            inputs = None
 
         if output_hidden_states:
             all_hidden_states += (hidden_states,)
@@ -478,21 +304,21 @@ class AutoencoderModel(AutoencoderPreTrainedModel):
         if not return_dict:
             return tuple(v for v in [hidden_states, next_cache, all_hidden_states, all_attns] if v is not None)
 
-        return (inputs, BaseModelOutputWithPast(
+        return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
             past_key_values=next_cache,
             hidden_states=all_hidden_states,
             attentions=all_attns
-        ))
+        )
 
 
-class AutoencoderForCausalLM(AutoencoderPreTrainedModel, FLAGenerationMixin):
+class JoyceForCausalLM(JoycePreTrainedModel, FLAGenerationMixin):
 
     _tied_weights_keys = ["lm_head.weight"]
 
     def __init__(self, config):
         super().__init__(config)
-        self.model = AutoencoderModel(config)
+        self.model = JoyceModel(config)
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         self.criterion = None
@@ -554,9 +380,6 @@ class AutoencoderForCausalLM(AutoencoderPreTrainedModel, FLAGenerationMixin):
         )
 
         model_outputs = outputs
-        ae_inputs = None
-        if isinstance(outputs, tuple) and len(outputs) == 2:
-            ae_inputs, model_outputs = outputs
 
         hidden_states = (
             model_outputs.last_hidden_state
@@ -566,7 +389,6 @@ class AutoencoderForCausalLM(AutoencoderPreTrainedModel, FLAGenerationMixin):
 
         logits = None if self.config.fuse_linear_cross_entropy else self.lm_head(hidden_states[:, -logits_to_keep:])
 
-        # Next-token prediction loss with masked prefix excluded
         loss = None
         if labels is not None:
             if getattr(self, 'criterion', None) is None:
@@ -581,7 +403,6 @@ class AutoencoderForCausalLM(AutoencoderPreTrainedModel, FLAGenerationMixin):
             labels = labels.to(hidden_states.device)
             # Shift left by 1 for next-token prediction
             labels = torch.cat((labels[..., 1:], torch.full_like(labels[:, :1], criterion.ignore_index)), 1)
-            # Determine which part to supervise and align labels/predictions
             seq_len_out = hidden_states.size(1)
             if masked_tokens_for_loss > 0:
                 # Align tail: predictions at indices [c:] correspond to labels at [m:]

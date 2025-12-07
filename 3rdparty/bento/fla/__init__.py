@@ -84,8 +84,8 @@ from fla.models import (
     TransformerModel,
     TransformerContinualForCausalLM,
     TransformerContinualModel,
-    AutoencoderContinualForCausalLM,
-    AutoencoderContinualModel,
+    JoyceForCausalLM,
+    JoyceModel,
 )
 from fla.models.autoencoder_predictor import (
     AutoencoderPredictorForCausalLM,
@@ -98,7 +98,7 @@ __all__ = [
     'BasedLinearAttention',
     'BitAttention', 'BitNetForCausalLM', 'BitNetModel',
     'AutoencoderForCausalLM', 'AutoencoderModel',
-    'AutoencoderContinualForCausalLM', 'AutoencoderContinualModel',
+    'JoyceForCausalLM', 'JoyceModel',
     'AutoencoderPredictorForCausalLM', 'AutoencoderPredictorModel',
     'CompressionPredictorModel',
     'Compress', 'Upsample',
